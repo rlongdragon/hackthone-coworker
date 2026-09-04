@@ -5,15 +5,7 @@
 // Run: npx tsx --env-file=.env.local worker/red-team.test.mts
 import { eq, inArray } from "drizzle-orm";
 import { db } from "../db";
-import {
-  attackFindings,
-  auditLog,
-  departments,
-  employees,
-  mcpServers,
-  mcpTools,
-  tools,
-} from "../db/schema";
+import { auditLog, departments, employees, mcpServers, mcpTools, tools } from "../db/schema";
 import { quarantineMemory, saveMemory, searchMemories } from "../lib/memory-store";
 import { autoTightenTool, listFindings, runRedTeam } from "../lib/red-team";
 
@@ -109,16 +101,17 @@ try {
   const [row] = await db.select({ policy: mcpTools.policy }).from(mcpTools).where(eq(mcpTools.serverId, srv.id));
   check("auto-tighten flipped risky MCP tool to blocked", row.policy === "blocked", row.policy);
 } finally {
-  if (mcpServerId) await db.delete(mcpServers).where(eq(mcpServers.id, mcpServerId));
+  // Deleting employees cascades tools / memories / attack_findings (all FK
+  // ON DELETE CASCADE), so cleanup is robust even if the body threw part-way.
+  // auditLog has no cascade → clear its refs first.
+  const safe = async (fn: () => Promise<unknown>) => { try { await fn(); } catch { /* pre-DDL / partial */ } };
+  if (mcpServerId) await safe(() => db.delete(mcpServers).where(eq(mcpServers.id, mcpServerId)));
   if (empIds.length) {
-    await db.delete(attackFindings).where(inArray(attackFindings.targetId, empIds));
-    await db.delete(auditLog).where(inArray(auditLog.employeeId, empIds));
-    await db.delete(tools).where(inArray(tools.id, toolIds.length ? toolIds : ["00000000-0000-0000-0000-000000000000"]));
-    await db.delete(employees).where(inArray(employees.id, empIds));
-    await db.delete(departments).where(inArray(departments.id, deptIds));
+    await safe(() => db.delete(auditLog).where(inArray(auditLog.employeeId, empIds)));
+    await safe(() => db.delete(employees).where(inArray(employees.id, empIds)));
+    await safe(() => db.delete(departments).where(inArray(departments.id, deptIds)));
   }
-  // red-team.run rows carry a null employeeId — clear the ones this run made.
-  await db.delete(auditLog).where(eq(auditLog.action, "redteam.autotighten"));
+  await safe(() => db.delete(auditLog).where(eq(auditLog.action, "redteam.autotighten")));
 }
 
 console.log("red-team.test done");
