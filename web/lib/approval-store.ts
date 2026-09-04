@@ -4,6 +4,7 @@ import { auditLog, departments, employees, pendingActions } from "@/db/schema";
 import { findVisibleToolById } from "@/lib/tool-store";
 import { executeAction } from "@/lib/tool-runtime";
 import { resolveAgentTool, runMcpToolGuarded } from "@/lib/mcp-exec";
+import { runDelegatedTurn } from "@/lib/delegation";
 
 const TTL_MS = 10 * 60 * 1000;
 
@@ -123,6 +124,35 @@ const ACTIONS: Record<string, ActionDef> = {
       const r = await runMcpToolGuarded(t, args);
       if (!r.ok) return { ok: false, message: r.text };
       return { ok: true, message: `已執行「${t.serverName} · ${toolName}」` };
+    },
+  },
+  // A cross-department delegation the CALLEE must consent to. The pending row's
+  // requester IS the callee (the approver), so actorId here is the coworker who
+  // was asked. On approval the sub-run executes as them, still under the
+  // intersected scope of the delegation chain (caller ∩ callee).
+  "delegation.ask": {
+    requiredRole: "employee",
+    execute: async (params, actorId) => {
+      const callerId = String(params.callerId ?? "");
+      const question = String(params.question ?? "");
+      const chain = Array.isArray(params.chain) ? params.chain.map(String) : [callerId];
+      const r = await runDelegatedTurn({ calleeId: actorId, question, chain });
+      await db.insert(auditLog).values({
+        employeeId: callerId,
+        action: "delegation.ask",
+        detail: {
+          callerId,
+          calleeId: actorId,
+          chain: [...chain, actorId],
+          via: "cross-dept-approval",
+          effectiveRole: r.effectiveRole,
+          exposedTools: r.exposedTools,
+          droppedTools: r.droppedTools,
+          ok: r.ok,
+        },
+      });
+      if (!r.ok) return { ok: false, message: r.text };
+      return { ok: true, message: `已同意並在交集權限下回覆:${r.text.slice(0, 500)}` };
     },
   },
 };

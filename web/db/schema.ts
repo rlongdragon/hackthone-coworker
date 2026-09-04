@@ -110,6 +110,14 @@ export const memories = pgTable(
     // FR-P-08: set on rows copied in by a handover (provenance + rollback key).
     sourceEmployeeId: uuid("source_employee_id").references(() => employees.id),
     handoverId: uuid("handover_id"),
+    // agent-society P2: information-flow provenance. `trusted` = written by the
+    // employee / a first-party path; `untrusted_derived` = distilled from
+    // untrusted content (a tool output, an inbound doc, another agent's answer).
+    // The red-team taint detector flags an auto action driven by an
+    // untrusted_derived row; the blue-team quarantines a poisoned row.
+    provenance: text("provenance").notNull().default("trusted"), // trusted | untrusted_derived
+    sourceAgentId: uuid("source_agent_id").references(() => employees.id), // which agent's context derived it
+    quarantined: boolean("quarantined").notNull().default(false),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (t) => [
@@ -552,3 +560,36 @@ export const auditLog = pgTable("audit_log", {
   detail: jsonb("detail"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+// agent-society Pillar 2: findings from the self-red-team loop. Each row is one
+// attack template fired at one live agent (or a graph-level audit), whether the
+// blue-team detected/defended it, and what auto-tightening action was applied.
+export const attackSeverityEnum = pgEnum("attack_severity", ["low", "medium", "high"]);
+// detected = the attack succeeded and was caught by a detector (a real finding);
+// defended = the PEP/guard blocked it (a passing control);
+// error = the run itself failed.
+export const attackStatusEnum = pgEnum("attack_status", ["detected", "defended", "error"]);
+
+export const attackFindings = pgTable(
+  "attack_findings",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    // The attack template key (e.g. "memory_timebomb", "confused_deputy").
+    template: text("template").notNull(),
+    category: text("category").notNull(), // injection | memory_poison | over_privilege | rug_pull | cross_agent
+    // The live agent under attack (null for graph-level / org-wide audits).
+    targetId: uuid("target_id").references(() => employees.id, { onDelete: "cascade" }),
+    severity: attackSeverityEnum("severity").notNull().default("medium"),
+    status: attackStatusEnum("status").notNull().default("defended"),
+    summary: text("summary").notNull(),
+    detail: jsonb("detail"),
+    // Blue-team actuator outcome, e.g. "memory_quarantined" | "tool_blocked" | "none".
+    actionTaken: text("action_taken").notNull().default("none"),
+    memoryIsolated: boolean("memory_isolated").notNull().default(false),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [
+    index("attack_findings_target_idx").on(t.targetId),
+    index("attack_findings_created_idx").on(t.createdAt),
+  ],
+);

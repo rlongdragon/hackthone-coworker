@@ -29,9 +29,9 @@ async function departmentOf(employeeId: string): Promise<string | null> {
   return e?.departmentId ?? null;
 }
 
-// Tools this employee may use: their own personal ones + their department's +
-// org-wide. Department tools only when the employee is actually in that dept.
-export async function listVisibleTools(employeeId: string): Promise<ToolRow[]> {
+// The raw visibility set for ONE principal: their own personal tools + their
+// department's + org-wide. Department tools only when they are actually in it.
+async function visibleForOne(employeeId: string): Promise<ToolRow[]> {
   const deptId = await departmentOf(employeeId);
   const scopeClauses = [
     and(eq(tools.scope, "personal"), eq(tools.ownerId, employeeId)),
@@ -41,17 +41,51 @@ export async function listVisibleTools(employeeId: string): Promise<ToolRow[]> {
   return db
     .select()
     .from(tools)
-    .where(and(eq(tools.enabled, true), or(...scopeClauses)));
+    // Deterministic order so a by-name `.find()` (e.g. same name at two scopes)
+    // is stable rather than DB-order-dependent.
+    .where(and(eq(tools.enabled, true), or(...scopeClauses)))
+    .orderBy(tools.scope, tools.id);
+}
+
+// Tools available for a (possibly delegated) run. `onBehalfOf` is the delegation
+// chain of PRIOR principals a sub-run acts on behalf of. The effective set is
+// the INTERSECTION over {employeeId, ...onBehalfOf}: a tool is usable only if
+// EVERY principal in the chain could use it on their own. This is the single
+// novel enforcement point — computed here at the PEP, never via the prompt — and
+// it is monotonic: appending a principal can only remove tools, so a delegation
+// chain can only attenuate authority, never widen it (macaroon-style caveats).
+// agent-society: when PEP enforcement is toggled off (framework-default mode,
+// for the contrast demo) the chain is ignored and the callee runs at full scope.
+export async function listVisibleTools(
+  employeeId: string,
+  onBehalfOf: string[] = [],
+): Promise<ToolRow[]> {
+  const own = await visibleForOne(employeeId);
+  if (onBehalfOf.length === 0 || !pepEnforced()) return own;
+  const priorSets = await Promise.all([...new Set(onBehalfOf)].map(visibleForOne));
+  const allow = priorSets.map((s) => new Set(s.map((t) => t.id)));
+  return own.filter((t) => allow.every((a) => a.has(t.id)));
+}
+
+// PEP enforcement switch. Default ON, and FORCED on in production — the "off"
+// (framework-default / prompt-only) mode exists only for the confused-deputy
+// contrast demo, so a single misconfigured env var can never silently disable
+// the whole cross-agent control on a real deployment.
+export function pepEnforced(): boolean {
+  if (process.env.NODE_ENV === "production") return true;
+  return process.env.AGENT_SOCIETY_ENFORCE !== "0";
 }
 
 // Resolve a tool by name *and* re-check the caller may see it — never trust the
-// model to only call visible tools. Returns null if not visible.
+// model to only call visible tools. `onBehalfOf` threads the delegation chain so
+// a sub-run resolves under caller ∩ callee. Returns null if not visible.
 export async function findVisibleTool(
   employeeId: string,
   name: string,
   kind?: "skill" | "action",
+  onBehalfOf: string[] = [],
 ): Promise<ToolRow | null> {
-  const visible = await listVisibleTools(employeeId);
+  const visible = await listVisibleTools(employeeId, onBehalfOf);
   return (
     visible.find((t) => t.name === name && (!kind || t.kind === kind)) ?? null
   );
@@ -60,8 +94,9 @@ export async function findVisibleTool(
 export async function findVisibleToolById(
   employeeId: string,
   id: string,
+  onBehalfOf: string[] = [],
 ): Promise<ToolRow | null> {
-  const visible = await listVisibleTools(employeeId);
+  const visible = await listVisibleTools(employeeId, onBehalfOf);
   return visible.find((t) => t.id === id) ?? null;
 }
 

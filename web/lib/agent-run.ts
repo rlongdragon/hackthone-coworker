@@ -291,6 +291,7 @@ export async function runAgentTurn(input: {
       "You are Coworker, the employee's AI colleague. Manage their todos, calendar events and projects via tools. " +
       "When they mention meetings or scheduling, use createEvent/listEvents; attach notes to events with addEventNote. " +
       "Save durable facts they share with the remember tool; use recallMemories when past context would help. " +
+      "When answering needs another person's or department's help, delegate with askCoworker — their agent answers under the intersection of your permissions and theirs, so it can never fetch data you yourself aren't allowed to see (it returns droppedTools when your scope removed something). " +
       "You have a personal Linux sandbox (runCommand/writeSandboxFile) with pandoc, python3 (docx/xlsx/pdf libs) and node for document processing and scripting — " +
       "no network inside; /workspace persists, keep reusable scripts in /workspace/skills/. " +
       "To make a PDF (especially with Chinese/CJK text) use the `doc2pdf <input> <output.pdf>` command (pandoc+weasyprint, embeds CJK fonts) — never plain reportlab, whose default fonts render CJK as blank/tofu. " +

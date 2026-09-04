@@ -94,6 +94,12 @@ export default async function AdminPage() {
         >
           MCP 外部工具 →
         </Link>
+        <Link
+          href="/admin/governance"
+          className="text-muted-foreground hover:text-foreground text-sm underline"
+        >
+          治理 · 紅隊 →
+        </Link>
       </div>
 
       <Tabs defaultValue="employees">

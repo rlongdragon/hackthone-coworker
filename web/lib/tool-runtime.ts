@@ -37,8 +37,13 @@ export async function runSkill(
   employeeId: string,
   name: string,
   args: string[],
+  // agent-society: the delegation chain a sub-run acts on behalf of. Threaded
+  // into resolution so a delegated skill is picked from the INTERSECTED set —
+  // otherwise a callee-only name lookup could execute a personal skill the
+  // caller was never allowed to invoke (scope-intersection bypass).
+  onBehalfOf: string[] = [],
 ): Promise<{ ok: boolean; error?: string; exitCode?: number; stdout?: string; stderr?: string }> {
-  const tool = await findVisibleTool(employeeId, name, "skill");
+  const tool = await findVisibleTool(employeeId, name, "skill", onBehalfOf);
   if (!tool || !tool.body) return { ok: false, error: `skill not found or not visible: ${name}` };
   const ext = tool.lang === "python" ? "py" : "sh";
   const rel = `skills/${name}.${ext}`;

@@ -52,6 +52,17 @@
 - **從 GitHub repo 安裝**(admin/org):貼 repo URL + **釘死 commit**,clone → 供應鏈掃描(install script、eval/child_process、憑證讀取、無 lockfile)→ 依賴裝 `--ignore-scripts` → 在 **`--network none` gVisor 容器**內執行(egress deny + 唯讀掛載 + cap-drop 兜底,審核只是分診不是防線)
 - 密鑰(stdio env / http header)AES-256-GCM 加密存,不落 server row、不進模型;所有變更寫審計
 
+### 受治理的委派 + 自我紅隊(agent-society)
+一群照公司權限彼此協作又不越權、還會全天候攻擊自己找漏洞的 AI 同事。兩根支柱共用同一張跨代理權限圖。
+- **受治理委派(Pillar 1)**:`askCoworker` 把問題委派給另一位同事的代理當**子執行**;有效權限 = `caller ∩ callee` 的**工具可見度交集**,在 `lib/tool-store.ts` 的 PEP 邊界計算,**不寫在 system prompt**(prompt 級「別洩漏」文獻失敗率 35–51%)。委派鏈只會**收斂不會放大**(交集單調遞減 = macaroon caveat);每一跳每個工具都重查交集,出處寫審計。money shot:業務代理問財務代理「工程部 Q3 薪酬」→ 資料存在但交集移除該工具 → 拒答;換 CFO 登入同一問題 → 回答。同代理同資料,權限決定。
+- **跨部門 HITL**:跨部門委派可要求 callee 本人先同意(重用 pending action + Telegram 批准鈕);同意後仍受交集權限約束。
+- **自我紅隊(Pillar 2)**:紅隊代理持續對在線代理(真記憶 + 已核准工具 + Pillar-1 權限圖)發攻擊樣板(記憶時炸彈、confused-deputy、過度授權;種子取自 PyRIT/garak/AgentDojo),藍隊自動收緊。
+- **記憶出處(taint)**:`memories.provenance`(trusted / untrusted_derived)+ `quarantined`;召回時排除隔離列(讀取期強制,不只標記);紅隊偵測到不可信記憶被一般查詢召回 → 藍隊隔離該列。
+- **權限圖稽核**:靜態列舉每個代理的 scope 授予,標出過度授權(非管理員可直接用 org 敏感動作);因交集只收斂,升權風險 = 直接過授,正是此處所抓。
+- **治理儀表板** `/admin/governance`:誰問誰、被交集擋掉什麼、紅隊抓到什麼、洩漏計分板(治理 vs framework-default 對照)。
+- 誠實邊界:強制在 PEP/工具邊界、非 prompt;偵測是機率性 —— 定位為「持續偵測 + 縮小爆炸半徑」,非「解決注入」。宣稱僅限三者**組合**之新穎:org-RBAC 推導且被強制的跨代理資訊流 + 活體社會 + 閉環自我紅隊;延伸 AgentLeak / SoK(2512.06914)/ CaMeL(2503.18813)/ AgentPoison,非發明。
+- DDL 見 `web/db/agent-society.sql`(memories 出處欄 + `attack_findings`;`docker exec -i coworkers-db-1 psql -U coworker -d coworker < db/agent-society.sql`)。
+
 ### 人工審核(HITL)
 - 敏感工具(調部門、改角色)不直接執行：先建立 pending action,聊天中出現確認卡片
 - 按下確認才執行,執行當下**重新查 DB 驗證權限**、寫入審計日誌;10 分鐘過期;重新整理頁面後卡片狀態從 DB 還原,不會重複執行
