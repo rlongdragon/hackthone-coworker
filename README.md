@@ -98,6 +98,10 @@ flowchart LR
 - **隔離執行**:每位員工一個 gVisor 容器(無網路、非 root、cap-drop、資源上限);MCP 由 repo 安裝的 server 也在 `--network none` 容器內跑。
 - **外部服務(皆自架)**:LLM gateway、Langfuse(觀測;用我們的 fork,多了即時時間軸)、FunASR 語音辨識、IMAP/SMTP 信箱。
 
+每一輪對話、委派子執行、PEP 判斷、LLM 呼叫都以 OpenTelemetry 送進自架 Langfuse;我們的 fork 加了 Logfire 風格的即時時間軸(`/project/<id>/live`),可以看到一次「主管問下屬代理」在幾秒內經過 askCoworker → PEP → 子代理 → LLM 的完整過程:
+
+![Langfuse fork 的即時時間軸:三筆 Coworker! trace 與其子 span](docs/img/langfuse-live.jpg)
+
 受治理委派的一次查詢:
 
 ```mermaid

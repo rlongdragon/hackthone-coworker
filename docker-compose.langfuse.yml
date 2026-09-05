@@ -29,6 +29,10 @@ x-langfuse-env: &langfuse-env
   NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?set in .env.langfuse}
   NEXTAUTH_URL: http://localhost:3001
   TELEMETRY_ENABLED: "false"
+  # v4 default is events_only; the fork's Live timeline (and the legacy
+  # observations/traces UI + public API) read the legacy tables, so keep
+  # writing both.
+  LANGFUSE_MIGRATION_V4_WRITE_MODE: dual
   CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
   CLICKHOUSE_URL: http://clickhouse:8123
   CLICKHOUSE_USER: clickhouse
