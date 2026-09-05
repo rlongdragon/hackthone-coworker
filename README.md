@@ -10,8 +10,6 @@
 
 Coworker! 的目標是把 AI 做成「有名字、有部門、有權限的同事」:代理之間的每一次詢問都經過模型外的**政策執行點(PEP)**,有效權限是雙方權限的**交集**、只會收斂不會放大;每次查詢(包含被拒絕的)都先寫進當事人看得到的**透明帳本**才執行;跨部門要**本人同意**;敏感動作走 **HITL**;系統還會**自我紅隊**,持續攻擊自己的代理並自動收緊。目標使用者是想讓 AI 真正進入組織、又不敢放手的中小企業。
 
-> 摘要(可貼投稿表單,約 160 字):Coworker! 是可完全自架的企業 AI 同事平台。每位員工有自己的代理,代理間可互問、委派、派工;權限在模型外的政策執行點以「權限交集」強制,委派鏈只會收斂。每次跨代理查詢先寫入當事人可見的透明帳本(含被拒絕的查詢)才執行,跨部門需本人同意,寄信、敏感工具走人工確認。內建會議錄音自架語音辨識轉行動項目、團隊代理、專案頻道、信箱,以及會自動收緊權限的自我紅隊。
-
 ## 核心功能
 
 - **受治理的委派(A2A)**:`askCoworker` 把問題交給另一位同事的代理當子執行;可用工具 = 兩人權限交集,在工具邊界計算、不寫在 prompt。委派鏈每一跳重算交集,只減不增。
@@ -22,7 +20,7 @@ Coworker! 的目標是把 AI 做成「有名字、有部門、有權限的同事
 - **團隊代理 + 專案頻道**:每個專案一個 `scope=team` 的代理,只看團隊產出(看板、檔案、會議)並附出處;頻道內 `@agent` 召喚,不會提升發話者權限。
 - **我的信箱**:員工用自己的 IMAP/SMTP 連接,密碼加密不進模型;來信自動抽行動項目、標不可信;寄信一律本人確認。
 - **自我紅隊**:紅隊代理對在線代理發動過度授權、混淆代理人、記憶時間炸彈、MCP 漂移等攻擊;藍隊自動停用工具、隔離記憶;每筆發現可「收緊 / 再跑一次」驗證。
-- **基礎能力**:每人獨立 gVisor 沙箱(無網路)執行指令與產檔、三層(個人 / 部門 / 全公司)共用工具庫、外部 MCP 工具接入(投毒審核、auto / hitl / blocked、rug-pull hash pin)、Telegram 頻道、交接傳承、長期記憶(本機 embedding)。
+- **基礎能力**(下方分節細講):每位 AI 同事的獨立沙箱、團隊共用工具庫、外部 MCP 工具、長期記憶、Telegram、交接傳承。
 
 | 敏感查詢被 PEP 擋下,並通知本人 | 當事人帳本:允許 1 / 拒絕 1,被擋欄位 |
 |---|---|
@@ -43,6 +41,61 @@ Coworker! 的目標是把 AI 做成「有名字、有部門、有權限的同事
 | 自我紅隊:發現 → 收緊 → 再跑一次 → defended | MCP 外部工具投毒審核與逐工具政策 |
 |---|---|
 | ![](docs/img/s10-redteam.jpg) | ![](docs/img/admin-mcp.jpg) |
+
+### 基礎能力:每位 AI 同事都有的底層
+
+上面的協作場景都建立在這幾個底層能力上。它們讓 AI 同事不只是「會聊天」,而是**能做事、能累積、能被團隊共用**,而且每一層都有自己的隔離與稽核。
+
+#### 1. 獨立執行環境(每人一個沙箱)
+
+每位員工的 AI 同事都有一個專屬的 Linux 容器:**gVisor 使用者態 kernel 隔離、`--network none`、非 root、`--cap-drop ALL`、記憶體 / CPU / pids 上限**。裡面預裝文書工具(pandoc、pdftotext、python 的 openpyxl / python-docx / python-pptx / pypdf / reportlab / weasyprint、node、含 Noto CJK 字型的 `doc2pdf`),AI 可以直接跑指令、轉檔、產報表。
+
+- `/workspace` 是 per-employee volume,**跨對話持久**:AI 把常用流程存成 `/workspace/skills/` 腳本,能力隨時間累積。
+- 聊天可直接夾檔:非圖片 / 文字附件自動複製進沙箱(標記為不可信資料),AI 用 `runCommand` 解析。
+- 產出可交回:`deliverFileToChat` 給聊天下載連結;專案對話另可存回專案文件。
+- 容器閒置 15 分鐘自動停止(volume 保留),下次秒級喚醒;**每條指令寫入審計日誌**,docker 指令一律 execFile 參數陣列、不經 host shell。
+
+![小明請 AI 在自己的沙箱用 python 產生 CSV,並交付到聊天下載](docs/img/sandbox-deliver.jpg)
+
+#### 2. 團隊共用工具庫(教一次,全部門都會)
+
+工具存在 DB,**新增工具 = 一筆資料,不用改程式、不用 redeploy**。兩種工具:
+
+| 種類 | 是什麼 | 怎麼跑 |
+| --- | --- | --- |
+| **skill** | 沙箱腳本(bash / python) | AI 用 `runSkill` 在**呼叫者自己的**沙箱執行 |
+| **action** | 外部整合(HTTP) | AI 用 `callAction` 由 server 端呼叫,可挑一組部門憑證 |
+
+- **三層 scope**:個人 / 部門 / 全公司。同範圍的 AI 同事自動看得到、能呼叫 —— 財務部的 `finance_report` 發佈後,全財務部的代理立刻都會;業務部的看不到。
+- 建立權限沿用 RBAC:個人人人可、部門 manager、全公司 admin;`/tools` 頁自助管理。
+- 憑證 AES-256-GCM 加密存,**只在呼叫當下 server 端解密注入 header,永不進沙箱 / AI context / 審計日誌**;action 執行前擋 http(s) 以外協定與 cloud metadata endpoint。
+- 敏感 action 走 HITL 確認卡片;工具可見性在執行期 server 端 re-check,不信模型;每次呼叫寫審計。
+- 這也是「受治理委派」的權限來源:委派時可用工具 = 兩人工具可見度的交集(見上方 S5)。
+
+| 工具庫頁:部門 scope 的 finance_report | 小明的代理用 `runSkill` 跑它,在自己的沙箱輸出報表 |
+|---|---|
+| ![](docs/img/tools-library.jpg) | ![](docs/img/shared-skill.jpg) |
+
+#### 3. 外部 MCP 工具(接得進來,但先審、再分級)
+
+接入外部 [MCP](https://modelcontextprotocol.io) server(http Streamable / stdio 本機指令),工具自動併入 agent,可見性沿用工具庫的三層模型。因為外部工具描述是攻擊面,接入流程本身就是防線:
+
+- **投毒審核**:新增後自動連線列工具,兩層檢查 —— 確定性掃描(隱藏 unicode、注入語句、憑證關鍵詞、敏感參數)守 fail-safe 底線,加上 LLM 審核代理(把工具描述當不可信資料)標紅可疑句;審核代理**只能把風險判更嚴,不能放寬**。
+- **auto / hitl / blocked**:每個工具一個政策 —— 唯讀類自動跑、有副作用類出確認卡片、破壞 / 惡意類根本不會給模型;預設偏嚴,管理者在 `/admin/mcp` 逐工具確認才啟用。
+- **rug-pull 防護**:核准當下把工具描述 + schema 做 hash pin,執行期比對;描述被改就自動停用該工具、要求重審。自我紅隊的 `mcp_drift` 攻擊會定期驗證這一點。
+- **輸出當資料**:MCP 回傳一律包在 `<mcp-result>` 標示不可信;連線失敗降級、不擋聊天。
+- **從 GitHub repo 安裝**(admin):貼 repo URL + **釘死 commit** → clone → 供應鏈掃描(install script、eval / child_process、憑證讀取、無 lockfile)→ 依賴 `--ignore-scripts` → 在 **`--network none` 的 gVisor 容器**內執行。審核是分診,容器是防線。
+- 密鑰(stdio env / http header)AES-256-GCM 加密,不落 server row、不進模型;所有變更寫審計。
+
+![政策為 auto 的 echo 工具直接執行並回傳;hitl 的會先出確認卡片,blocked 的模型看不到](docs/img/mcp-call.jpg)
+
+後台審核畫面(風險分級、逐工具政策)見上方「MCP 外部工具投毒審核」截圖。
+
+#### 4. 長期記憶、Telegram、交接傳承
+
+- **長期記憶**:pgvector 語意召回,相關記憶自動注入每輪對話;embedding 在本機 CPU 跑(`multilingual-e5-small`),不需要 embedding API。記憶有**出處欄**(trusted / untrusted_derived)與 `quarantined` 旗標,召回時在讀取期排除隔離列;紅隊發現被植入的記憶被一般查詢召回時,藍隊直接隔離該列。
+- **Telegram 頻道**:同一套 agent 核心接上 Telegram,私訊 = 網頁聊天鏡像(沙箱、工具庫、行事曆、記憶全套),串流輸出、附件進沙箱、HITL 待審動作推播成批准 / 拒絕按鈕;群組模式要管理員 `/authorize` 綁定,發話者必須是已綁定的成員,以本人身分與權限執行。
+- **交接傳承**:離職 / 轉調時把個人 AI 的工作脈絡(工作記憶、沙箱技能、卡片 / 待辦 / 行程)打包給接手者,交出者本人簽核、發起人不能自批;AI 先做知識缺口分析、自動生成訪談題,接手者可「問前任」;完成後產生職位現況報告。
 
 完整功能說明見 [docs/FEATURES.md](docs/FEATURES.md)。
 
@@ -183,7 +236,7 @@ cd web && npm run seed:demo    # 財務部 + 業務部 6 個帳號、A 專案、
 ## 作品展示
 
 - 作品展示網址(選填):—
-- 評選影片:(待補 YouTube 連結)
+- 評選影片:https://w.rlong.me/coworker-demo-video
 - 逐場景操作腳本與素材:https://w.rlong.me/coworker-demo
 
 ## 限制與未來工作
@@ -214,18 +267,18 @@ cd web && npm run seed:demo    # 財務部 + 業務部 6 個帳號、A 專案、
 | greenmail(demo 信箱伺服器) | https://greenmail-mail-test.github.io/greenmail/ | Apache-2.0 |
 | FunASR(自架 ASR 服務,repo 外) | https://github.com/modelscope/FunASR | MIT |
 | 紅隊攻擊樣板參考 | PyRIT(MIT)、garak(Apache-2.0)、AgentDojo(MIT) | 僅參考攻擊類型,未複製程式 |
-| 研究參考 | AgentLeak、SoK(arXiv 2512.06914)、CaMeL(arXiv 2503.18813)、AgentPoison | 論文 |
+| 研究參考 | AgentLeak、SoK(arXiv 2512.06914)、CaMeL(arXiv 2503.18813)、AgentPoison、Your Agent Is Mine(arXiv 2604.08407,惡意 LLM API 中介 / 供應鏈攻擊) | 論文 |
 | demo 資料 | `web/worker/seed-demo-env.mts` 自行編寫的虛構公司、人物、信件、會議;會議音檔為 TTS 合成語音 | 團隊自製,無真人資料 |
-| 影片旁白(如有) | piper TTS(MIT)/ Qwen3-TTS(Apache-2.0)以團隊成員本人聲音合成 | 團隊自製 |
-
-儲存庫內沒有任何 API key、token 或密碼:LLM / Langfuse / 信箱等密鑰全部由 `.env.local`、`.env.langfuse`(皆 gitignored)提供。
 
 ## 團隊成員
 
-| 姓名 | 分工 |
+| 暱稱 | 分工 |
 | --- | --- |
-| rlongdragon | 架構、Agent runtime、PEP / 帳本、紅隊、demo |
-|  |  |
+| rlongdragon | 系統架構、Agent runtime、PEP 權限交集 / 透明帳本、自我紅隊、demo 環境與腳本 |
+| Nathan | 前端 UI(聊天、看板、專案頻道、待辦同意流程)、截圖與視覺 |
+| 艾洛 | 產品定位與痛點論述、簡報與評選影片、繳交 |
+| Yoru | 基礎設施:自架 LLM gateway、Langfuse 觀測、gVisor 沙箱與部署 |
+| Yuan | 協作資料流:會議 ASR、信箱 IMAP/SMTP、Telegram 整合、E2E 測試 |
 
 ## License
 

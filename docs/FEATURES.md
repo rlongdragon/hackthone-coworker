@@ -43,7 +43,7 @@
 - 憑證加密存(AES-256-GCM,主金鑰 `TOOL_SECRET_KEY`/`AUTH_SECRET`),**永不進 sandbox / AI context / 審計日誌**,只在呼叫當下 server 端解密注入
 - 敏感 action 走 HITL 確認卡片;每次呼叫寫審計;`/tools` 頁自助管理(建立權限沿用 RBAC:個人人人可、部門 manager、全公司 admin)
 
-### MCP 外部工具(FR-T-MCP)
+### MCP 外部工具(FR-A-06)
 - 接入外部 [MCP](https://modelcontextprotocol.io) server(http Streamable / stdio 本機指令),工具自動併入 agent;可見性沿用工具庫模型(個人/部門/全公司)
 - **投毒審核**:新增後自動連線列工具,兩層檢查 —— 確定性掃描(隱藏 unicode、注入語句、憑證關鍵詞、敏感參數)守 fail-safe 底線 + LLM 審核 agent(工具描述當不可信資料)標紅可疑句;agent 只能把風險判**更嚴**,不能放寬
 - **auto / 需審批 / 封鎖**:每工具一個 policy,唯讀類自動跑、有副作用類走 HITL 審批卡片、破壞/惡意類封鎖;預設偏嚴,管理者在 `/admin/mcp` 逐工具確認才啟用
@@ -236,3 +236,85 @@ scripts/setup-gvisor.sh gVisor runtime 安裝(sandbox 隔離)
 - Agent sandbox 多層防護：gVisor(使用者態 kernel,擋 kernel 逃逸)+ `--network none` + 非 root + `--cap-drop ALL` + memory/cpu/pids 上限;docker 指令一律 execFile 參數陣列(不經 host shell);每條指令進審計日誌
 - 工具庫：憑證 AES-256-GCM 加密存,只在 server 端呼叫當下解密注入 header,永不進 sandbox/AI/audit;action 執行前擋 http(s) 以外協定與 cloud metadata endpoint;工具可見性(個人/部門/全公司)於執行時 server 端 re-check,不信 model;敏感 action 走 HITL
 - MCP:外部工具描述與回傳皆視為不可信(審核 agent 把描述當資料、回傳框 `<mcp-result>`);投毒審核採確定性掃描守 fail-safe 底線、LLM 只能加嚴;每工具 policy(auto/hitl/blocked)+ 描述 hash pin 防 rug-pull;可見性/enabled/policy 於執行期 re-check;stdio/git/docker 一律 execFile 參數陣列;repo 安裝釘 commit、依賴 `--ignore-scripts`、在 `--network none` gVisor 容器內跑(egress deny 兜底)
+
+## 規格書對照(FR → 實作狀態,2026-09-06)
+
+規格書 https://w.rlong.me/coworker-network 為 2026-08 的原始需求;下表是逐條實作狀態。狀態:✅ 已實作 / ◐ 部分 / ✗ 未做。
+
+### FR-P 個人 agent
+
+| 編號 | 需求 | 優先級 | 狀態 | 對應實作(本文件章節 / 頁面 / 檔案) |
+|---|---|---|---|---|
+| FR-P-01 | 個人記憶 | MUST | ✅ | 「長期記憶」:pgvector 語意召回、本機 embedding;`lib/memory-store.ts` |
+| FR-P-02 | 待辦與排程 | MUST | ✅ | 「對話代理」待辦/行事曆工具;`/me/todos`、`/me/calendar` |
+| FR-P-03 | 雜事代辦 | MUST | ✅ | 「Agent Sandbox」產檔交回;「我的信箱」信件草擬(`sendEmail` 只送審);「協作資料流入」會議重點抽取 |
+| FR-P-04 | 自然語言互動 | MUST | ✅ | 「對話代理」網頁聊天 + 「Telegram 頻道」私訊鏡像 |
+| FR-P-05 | 個人化學習 | SHOULD | ◐ | preference 類記憶自動注入;無顯式回饋(讚/倒讚)學習迴路 |
+| FR-P-06 | 記憶可控 | SHOULD | ✗ | 無記憶檢視/編輯/刪除 UI;`listMemories`/`deleteMemory` 只給紅隊內部用 |
+| FR-P-07 | 主動提醒 | COULD | ✅ | 到期提醒、「今日總覽」逾期待辦、Telegram `/notify_on` 推播 |
+| FR-P-08 | 交接傳承 | SHOULD | ✅ | 「交接傳承」:記憶/技能/事項打包、簽核、回滾、知識缺口訪談 |
+| FR-P-09 | 新人上手 | COULD | ✅ | 「交接傳承」職位現況報告、問前任(`askPredecessor`) |
+| FR-P-10 | 自動週報 | SHOULD | ◐ | 只有「今日總覽」AI 每日簡報(`/api/briefing`);無週報彙整 |
+| FR-P-11 | 代理出席會議 | COULD | ◐ | 會議錄音 → 自架 ASR → 決議/行動項目(「協作資料流入」);非即時代出席 |
+
+### FR-D 部門大腦
+
+| 編號 | 需求 | 優先級 | 狀態 | 對應實作(本文件章節 / 頁面 / 檔案) |
+|---|---|---|---|---|
+| FR-D-01 | 部門知識庫 | MUST | ◐ | 「專案協作」專案文件 + 「A2A 透明帳本」團隊代理(看板/檔案/決議);無部門層知識庫 |
+| FR-D-02 | 會議紀要 | MUST | ✅ | 「協作資料流入」會議記錄 → 決議 / 行動項目 → 待辦 |
+| FR-D-03 | 工程技能包 | MUST | ✗ | 無 code/issue/上線追蹤;工具庫「開 git 卡片」僅為說明例子 |
+| FR-D-04 | 行銷技能包 | SHOULD | ✗ | — |
+| FR-D-05 | 財務技能包 | SHOULD | ◐ | demo 財務部共用 skill `finance_report`(`seed:demo`);無營運健康度/異常預警 |
+| FR-D-06 | 共用工具庫 | MUST | ✅ | 「工具庫」skill/action、個人/部門/全公司三層 scope;`/tools` |
+| FR-D-07 | 工具權限與版本 | SHOULD | ◐ | 使用權限(scope + RBAC)✅、異動寫審計 ✅、執行期 DB-fresh 取最新版 ✅、MCP 描述 hash pin/釘 commit;無版本號/歷程/回滾 |
+| FR-D-08 | 技能包可插拔 | COULD | ◐ | 工具庫 + 「MCP 外部工具」可加裝;無技能包打包/安裝單位 |
+| FR-D-09 | 知識回流 | COULD | ◐ | sandbox `/workspace/skills` 累積、長期記憶;無知識庫沉澱流程 |
+| FR-D-10 | 找人找專長 | SHOULD | ✗ | — |
+
+### FR-M 主管 agent
+
+| 編號 | 需求 | 優先級 | 狀態 | 對應實作(本文件章節 / 頁面 / 檔案) |
+|---|---|---|---|---|
+| FR-M-01 | 語音/文字下令 | MUST | ◐ | 文字派工 ✅(「派工 / 專案頻道 / 信箱」);語音僅會議錄音 ASR |
+| FR-M-02 | 自動派工 | MUST | ◐ | 會議行動項目建議負責人 + 人工確認;無專長/負載模型 |
+| FR-M-03 | 全隊狀態視圖 | MUST | ✅ | 「主管視角」`/manager` 團隊工作量表 |
+| FR-M-04 | 派工可調整 | SHOULD | ✅ | 派工可改指派、被指派者可拒絕(HITL) |
+| FR-M-05 | 進度追蹤 | SHOULD | ◐ | `/manager` 每次載入 DB-fresh 聚合待辦數;無卡片狀態/進度推送 |
+| FR-M-06 | 風險提示 | COULD | ✗ | 僅 `/manager` 對 >5 件未完成待辦標黃;無逾期/卡關示警 |
+| FR-M-07 | 負載平衡建議 | SHOULD | ✗ | — |
+
+### FR-C 協作串接
+
+| 編號 | 需求 | 優先級 | 狀態 | 對應實作(本文件章節 / 頁面 / 檔案) |
+|---|---|---|---|---|
+| FR-C-01 | 會後自動派任務 | MUST | ✅ | 會議行動項目 → 派工(保留人工確認 + 跨部門本人同意) |
+| FR-C-02 | 逐層回報 | MUST | ◐ | 「主管視角」聚合;無部門層彙整 |
+| FR-C-03 | 跨層查詢 | SHOULD | ✅ | 團隊代理 + `askCoworker`(「受治理的委派」) |
+| FR-C-04 | 權限分層 | MUST | ✅ | PEP 交集(`lib/tool-store.ts`、`lib/pep.ts`);主管永遠看不到對話/私人記憶 |
+| FR-C-05 | 關鍵動作確認 | SHOULD | ✅ | 「人工審核(HITL)」pending action + Telegram 批准鈕 |
+| FR-C-06 | 現有工具接入 | COULD | ◐ | MCP / Telegram / IMAP-SMTP ✅;Slack / Teams ✗ |
+| FR-C-07 | 跨部門 agent 直談 | SHOULD | ✅ | 「受治理的委派」A2A `askCoworker` + 跨部門 HITL |
+| FR-C-08 | 決策留痕 | SHOULD | ✅ | 「A2A 透明帳本」`audit_log` + 管理後台審計日誌 |
+
+### v2 新增(規格書 v2 補充節)
+
+| 編號 | 需求 | 狀態 | 對應實作(本文件章節) |
+|---|---|---|---|
+| FR-A-01 | 代理間查詢 askCoworker | ✅ | 受治理的委派 + 自我紅隊 |
+| FR-A-02 | 權限交集 PEP | ✅ | 受治理的委派 + 自我紅隊 |
+| FR-A-03 | 敏感/私人硬邊界 | ✅ | A2A 透明帳本(scope PEP、內容底線) |
+| FR-A-04 | 當事人透明帳本 | ✅ | A2A 透明帳本(`/me/ledger`) |
+| FR-A-05 | 跨部門本人同意 | ✅ | 派工 / 專案頻道 / 信箱(派工)+ 受治理的委派(跨部門 HITL) |
+| FR-A-06 | 外部 MCP 工具治理 | ✅ | MCP 外部工具 |
+| FR-A-07 | 自我紅隊 | ✅ | 受治理的委派 + 自我紅隊(治理儀表板 `/admin/governance`) |
+| FR-A-08 | 團隊代理與專案頻道 | ✅ | A2A 透明帳本(團隊代理)、派工 / 專案頻道 / 信箱(專案頻道) |
+| FR-A-09 | 自架信箱 | ✅ | 派工 / 專案頻道 / 信箱(我的信箱 `/me/mail`) |
+| FR-A-10 | 記憶出處與隔離 | ✅ | 受治理的委派 + 自我紅隊(記憶出處 taint) |
+| FR-A-11 | 獨立執行沙箱 | ✅ | Agent Sandbox(通用執行環境) |
+
+### 統計
+
+- 原始 36 條 FR:✅ 17 / ◐ 13 / ✗ 6(FR-P 7/3/1、FR-D 2/5/3、FR-M 2/3/2、FR-C 6/2/0)
+- v2 補充 FR-A-01..11:✅ 11 / 11
+- 誠實說明:黑客松主軸(FR-A 的 A2A 治理)不在原始規格內;原始規格仍有 6 條未做 —— FR-D-03(MUST)、FR-P-06 / FR-D-04 / FR-D-10 / FR-M-07(SHOULD)、FR-M-06(COULD)。
