@@ -68,3 +68,42 @@ CREATE TABLE IF NOT EXISTS telegram_group_messages (
   digested_event_id uuid
 );
 CREATE INDEX IF NOT EXISTS tg_group_msgs_chat_time_idx ON telegram_group_messages (chat_id, sent_at);
+
+-- P4: in-app channels (SSE)
+CREATE TABLE IF NOT EXISTS channels (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name text NOT NULL DEFAULT 'general',
+  created_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS channels_project_name_uq ON channels (project_id, name);
+CREATE TABLE IF NOT EXISTS channel_messages (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  channel_id uuid NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  author_id uuid REFERENCES employees(id) ON DELETE SET NULL,
+  author_type text NOT NULL DEFAULT 'user',
+  content text NOT NULL,
+  mentions jsonb,
+  reply_to_id uuid,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS channel_messages_channel_time_idx ON channel_messages (channel_id, created_at);
+
+-- P4: per-employee mailbox (IMAP/SMTP self-auth; password in tool_secrets)
+CREATE TABLE IF NOT EXISTS email_accounts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  employee_id uuid NOT NULL UNIQUE REFERENCES employees(id) ON DELETE CASCADE,
+  from_address text NOT NULL,
+  username text NOT NULL,
+  imap_host text NOT NULL,
+  imap_port integer NOT NULL DEFAULT 993,
+  imap_secure boolean NOT NULL DEFAULT true,
+  smtp_host text NOT NULL,
+  smtp_port integer NOT NULL DEFAULT 587,
+  smtp_secure boolean NOT NULL DEFAULT false,
+  enabled_at timestamp NOT NULL DEFAULT now(),
+  disabled_at timestamp,
+  last_sync_at timestamp,
+  last_uid integer NOT NULL DEFAULT 0
+);

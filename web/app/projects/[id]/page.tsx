@@ -21,6 +21,7 @@ import { ProjectFiles } from "./project-files";
 import { KanbanBoard } from "./kanban-board";
 import { MeetingMinutes } from "./meeting-minutes";
 import { TeamAgent } from "./team-agent";
+import { DispatchForm } from "./dispatch-form";
 import { listMeetingRecords } from "@/lib/meeting-store";
 import { getTeamAgent } from "@/lib/team-agent";
 import { asrConfigured } from "@/lib/asr";
@@ -56,6 +57,9 @@ export default async function ProjectPage({
         </Link>
         <h1 className="text-xl font-semibold tracking-tight">{project.name}</h1>
         {project.status === "archived" && <Badge variant="outline">已封存</Badge>}
+        <Link href={`/projects/${project.id}/chat`} className="text-muted-foreground hover:text-foreground text-sm underline">
+          專案頻道 →
+        </Link>
         {isOwner && (
           <form action={setProjectStatus} className="ml-auto">
             <input type="hidden" name="projectId" value={project.id} />
@@ -205,6 +209,11 @@ export default async function ProjectPage({
           canDeleteAll={isOwner}
           myId={user.id}
         />
+
+        {/* Manager dispatch (P4): same rule as meeting-item confirm */}
+        {project.status === "active" && (
+          <DispatchForm projectId={project.id} members={members.map((m) => ({ id: m.id, name: m.name }))} />
+        )}
 
         {/* My conversations in this project */}
         <Card className="h-fit">

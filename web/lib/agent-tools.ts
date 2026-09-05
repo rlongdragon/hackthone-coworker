@@ -386,6 +386,31 @@ export function makeTools(
           };
         }),
     }),
+    sendEmail: tool({
+      description:
+        "替員工草擬一封 email 並送審。絕不會直接寄出:一律建立待審核動作,員工在聊天或 /me/mail 按「確認寄出」後才用他自己的信箱(SMTP)寄出。需先在 /me/mail 連接信箱。",
+      inputSchema: z.object({
+        to: z.string().max(320).describe("收件人 email"),
+        subject: z.string().max(200),
+        text: z.string().max(20000).describe("純文字內容"),
+      }),
+      execute: ({ to, subject, text }) =>
+        span("tool.sendEmail", { employeeId, "mail.to": to }, async (set) => {
+          const { getMailbox } = await import("@/lib/mail-store");
+          if (!(await getMailbox(employeeId))) {
+            return { ok: false, error: "尚未連接信箱,請先到 /me/mail 連接 IMAP/SMTP。" };
+          }
+          const p = await createPendingAction(employeeId, "mail.send", { to, subject, text });
+          set({ "mail.needsApproval": true });
+          return {
+            needsApproval: true,
+            approvalId: p.id,
+            summary: `寄信給 ${to}:「${subject}」`,
+            expiresAt: p.expiresAt.toISOString(),
+            note: "Tell the user to press the confirm button shown in the chat — nothing is sent until they do.",
+          };
+        }),
+    }),
     listProjects: tool({
       description: "List projects the employee belongs to.",
       inputSchema: z.object({}),

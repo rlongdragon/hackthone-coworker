@@ -98,6 +98,12 @@ export default async function DashboardPage() {
         >
           關於我的查詢紀錄 →
         </Link>
+        <Link
+          href="/me/mail"
+          className="text-muted-foreground hover:text-foreground text-sm underline"
+        >
+          我的信箱 →
+        </Link>
       </div>
 
       <div className="space-y-4">

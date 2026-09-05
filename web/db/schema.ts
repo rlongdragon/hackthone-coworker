@@ -215,6 +215,71 @@ export const telegramGroupMessages = pgTable(
   (t) => [index("tg_group_msgs_chat_time_idx").on(t.chatId, t.sentAt)],
 );
 
+// ============================================================================
+// P4 · in-app channels (SSE, no websocket). One channel per project; access =
+// CURRENT project membership (authoritative, re-checked per request), never a
+// stale member row. `@agent` in a message pulls the project's TEAM agent into
+// the channel — the mention never elevates the author's privileges: the agent
+// answers under its own team scope only.
+// ============================================================================
+export const channels = pgTable(
+  "channels",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    name: text("name").notNull().default("general"),
+    createdBy: uuid("created_by").references(() => employees.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("channels_project_name_uq").on(t.projectId, t.name)],
+);
+
+export const channelMessages = pgTable(
+  "channel_messages",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    authorId: uuid("author_id").references(() => employees.id, { onDelete: "set null" }),
+    authorType: text("author_type").notNull().default("user"), // user | agent
+    content: text("content").notNull(),
+    mentions: jsonb("mentions").$type<{ type: "user" | "agent"; id: string }[]>(),
+    // for agent replies: which message triggered it
+    replyToId: uuid("reply_to_id"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [index("channel_messages_channel_time_idx").on(t.channelId, t.createdAt)],
+);
+
+// P4 · per-employee mailbox. The employee self-authenticates with their OWN
+// IMAP/SMTP credentials (no Graph API / OAuth broker); the password is stored
+// AES-256-GCM in tool_secrets under `mail/<employeeId>` (personal scope), never
+// here. Inbound mail lands as collab_events(mail, private, tainted); SENDING
+// always goes through HITL (mail.send pending action).
+export const emailAccounts = pgTable("email_accounts", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  employeeId: uuid("employee_id")
+    .notNull()
+    .unique()
+    .references(() => employees.id, { onDelete: "cascade" }),
+  fromAddress: text("from_address").notNull(),
+  username: text("username").notNull(),
+  imapHost: text("imap_host").notNull(),
+  imapPort: integer("imap_port").notNull().default(993),
+  imapSecure: boolean("imap_secure").notNull().default(true),
+  smtpHost: text("smtp_host").notNull(),
+  smtpPort: integer("smtp_port").notNull().default(587),
+  smtpSecure: boolean("smtp_secure").notNull().default(false),
+  enabledAt: timestamp("enabled_at").defaultNow().notNull(),
+  disabledAt: timestamp("disabled_at"),
+  lastSyncAt: timestamp("last_sync_at"),
+  // highest IMAP UID already ingested (incremental fetch)
+  lastUid: integer("last_uid").notNull().default(0),
+});
+
 // FR-P-08 交接傳承: package one employee's agent-accumulated context and hand
 // it to a successor, under approval. Copies, never moves — handover_id tags
 // every copied row so a failed run rolls back clean.

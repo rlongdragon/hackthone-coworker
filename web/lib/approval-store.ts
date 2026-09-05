@@ -7,6 +7,7 @@ import { resolveAgentTool, runMcpToolGuarded } from "@/lib/mcp-exec";
 import { runScopedAsk } from "@/lib/delegation";
 import type { ScopeLabel } from "@/lib/pep";
 import { assignTodoFromDispatch, markMeetingTask } from "@/lib/meeting-store";
+import { sendMail } from "@/lib/mail-store";
 
 const TTL_MS = 10 * 60 * 1000;
 
@@ -171,6 +172,21 @@ const ACTIONS: Record<string, ActionDef> = {
         detail: { assigneeId: actorId, projectId, title, todoId, via: "cross-dept-approval" },
       });
       return { ok: true, message: `已接受指派:「${title}」已加入你的待辦` };
+    },
+  },
+  // Outbound mail ALWAYS goes through here: the employee (requester == approver)
+  // confirms the exact to/subject/body before anything leaves their mailbox.
+  // Sent as them, via their own SMTP credentials.
+  "mail.send": {
+    requiredRole: "employee",
+    execute: async (params, actorId) => {
+      const to = String(params.to ?? "").trim();
+      const subject = String(params.subject ?? "").trim();
+      const text = String(params.text ?? "");
+      if (!to || !subject) return { ok: false, message: "收件人與主旨必填" };
+      const r = await sendMail(actorId, { to, subject, text });
+      if (!r.ok) return { ok: false, message: r.error };
+      return { ok: true, message: `已寄出給 ${to}:「${subject}」` };
     },
   },
 };
