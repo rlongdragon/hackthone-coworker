@@ -63,6 +63,22 @@
 - 誠實邊界:強制在 PEP/工具邊界、非 prompt;偵測是機率性 —— 定位為「持續偵測 + 縮小爆炸半徑」,非「解決注入」。宣稱僅限三者**組合**之新穎:org-RBAC 推導且被強制的跨代理資訊流 + 活體社會 + 閉環自我紅隊;延伸 AgentLeak / SoK(2512.06914)/ CaMeL(2503.18813)/ AgentPoison,非發明。
 - DDL 見 `web/db/agent-society.sql`(memories 出處欄 + `attack_findings`;`docker exec -i coworkers-db-1 psql -U coworker -d coworker < db/agent-society.sql`)。
 
+### A2A 透明帳本(a2a-ledger)
+「不留紀錄 = 不執行」。代理間查詢多一層 **scope 交集 PEP**,而且被查的**當事人看得到誰查了什麼、被允許或被拒絕**。
+- **scope PEP**:`askCoworker` 要標 scope(`project` / `team` / `private` / `sensitive`)。`sensitive`(請假原因、健康、薪資)與 `private` **只有本人**可存取 —— 主管、admin 都擋、無 HITL 例外;`project`/`team` 看共同專案或直屬主管。決策在 `lib/pep.ts`,不在 prompt。
+- **內容底線**:模型自報的 scope 只能被內容比對**往上收緊**(`stricterScope(declared, detectMinimumScope(question))`),把敏感問題標成 project 不會繞過。
+- **帳本**:每次 A2A 查詢(允許或拒絕)先寫 `audit_log`(subject / scope / allowed / 被擋欄位 / 目的)再執行;跨部門 HITL 在同意後才記,拒絕永不記成允許。
+- **當事人視角** `/me/ledger`:「今天有 N 筆關於你的查詢,✅ 允許 X / ⛔ 拒絕 Y」,含被拒絕的敏感查詢與通知;`匯出 JSON` 一鍵下載自己的帳本(GDPR 式)。**現行產品/法規對職場代理都只揭露「被允許」的存取,「被拒絕」是本產品獨有**(措辭:No product ships this,非 Nobody can)。
+- **通知**:寫進 `notifications` 表 + Telegram 推播當事人(已綁定者,≤5 秒)。
+- **團隊代理**:每個專案一個代理身分(scope=team、無工具),只看團隊自己產出的看板/檔案/會議決議作答並附出處;非成員 404。
+
+### 協作資料流入:會議記錄 / ASR / Telegram 群組摘要(collab)
+- **會議記錄**(專案頁):上傳會議音檔或貼逐字稿 → `collab_events`(scope=team、標 tainted、寫入期分類)→ 本地模型抽「決議 / 行動項目」,全部「需確認」→ 人工勾選、指定負責人 → 建立待辦(`assignedBy` 記誰派的);**跨部門指派要被指派者本人同意**(HITL)。被指派者待辦頁顯示「由 X 指派」。
+- **自架 ASR**:`lib/asr.ts` 呼叫 AiMeetingMinutes(FunASR Nano + 說話者分離,跑在 GPU 機經 Tailscale,`ASR_BASE_URL`),`POST /api/transcribe` + SSE job stream → 帶說話者的逐字稿;不用外部 ASR SaaS。服務端啟動見 `docs`/lab 機 `run-asr.sh`。
+- **Telegram 群組摘要**:開了 `/group_context on` 的群組才保存訊息;`/digest [小時]` 或每日彙整 → 同一條 collab_events + 抽取流程 → 出現在綁定專案的「會議記錄」。
+- **治理儀表板閉環**:紅隊新增 `mcp_drift`(重列已啟用 MCP、hash 比對,漂移 → 自動封鎖)、過度授權自動停用工具;每筆發現可「收緊 / 封鎖 / 再跑一次」;委派鏈逐跳視覺化(可用工具數、−交集移除)。
+- DDL 見 `web/db/a2a-ledger.sql`;`npm run test` 跑全部 worker 測試。
+
 ### 人工審核(HITL)
 - 敏感工具(調部門、改角色)不直接執行：先建立 pending action,聊天中出現確認卡片
 - 按下確認才執行,執行當下**重新查 DB 驗證權限**、寫入審計日誌;10 分鐘過期;重新整理頁面後卡片狀態從 DB 還原,不會重複執行
