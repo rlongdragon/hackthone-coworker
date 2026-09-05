@@ -1,0 +1,20 @@
+# Postgres + pgvector — Coworker! app database (employees, memory, todos, audit).
+#   docker compose -f docker-compose.postgres.yml up -d
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: coworker
+      POSTGRES_PASSWORD: coworker
+      POSTGRES_DB: coworker
+    ports:
+      - "5433:5432"   # host 5433 -> container 5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coworker"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - coworker_pg:/var/lib/postgresql/data
+volumes:
+  coworker_pg:

@@ -1,0 +1,23 @@
+# deps / build
+node_modules/
+.next/
+dist/
+*.log
+
+# secrets — never commit
+.env
+.env.local
+*.env.local
+.env.langfuse
+
+# AI-generated working docs (local only, not shared)
+PROGRESS.md
+langfuse-agentview-requirements.md
+web/AGENTS.md
+web/CLAUDE.md
+
+# tool state
+.otosu/
+
+# uploaded project files (runtime data)
+web/uploads/
