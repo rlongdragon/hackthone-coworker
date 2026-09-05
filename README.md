@@ -79,6 +79,12 @@
 - **治理儀表板閉環**:紅隊新增 `mcp_drift`(重列已啟用 MCP、hash 比對,漂移 → 自動封鎖)、過度授權自動停用工具;每筆發現可「收緊 / 封鎖 / 再跑一次」;委派鏈逐跳視覺化(可用工具數、−交集移除)。
 - DDL 見 `web/db/a2a-ledger.sql`;`npm run test` 跑全部 worker 測試。
 
+### 派工 / 專案頻道 / 信箱(P4,collab)
+- **派工**:專案頁「指派任務」(或會議行動項目確認)→ 同部門直接建待辦並通知;**跨部門要被指派者本人同意**(HITL `dispatch.assign`)。待辦標「由 X 指派」。
+- **專案頻道** `/projects/:id/chat`:每專案一個 `#general`,成員即時(SSE,不用 WebSocket);打 `@agent` 召喚團隊代理 —— 它以自己的 team scope 作答,**提及不會提升發話者權限**;非成員 404。
+- **我的信箱** `/me/mail`:用自己的 IMAP/SMTP 帳密連接(自驗、無 Graph/OAuth 中介),密碼 AES-256-GCM 存 `tool_secrets`(`mail/<employeeId>`),不進模型。收信 → `collab_events(mail, private, tainted)` + 決議/行動項目抽取(依 UID 增量);**寄信一律走 HITL**(`mail.send`,本人確認才用自己的 SMTP 寄;代理工具 `sendEmail` 只會送審)。
+- demo/測試用自架信件伺服器:`docker run -d --name coworkers-greenmail -p 3025:3025 -p 3143:3143 -e GREENMAIL_OPTS="-Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled" greenmail/standalone:2.1.0`(IMAP 127.0.0.1:3143、SMTP 3025、任何帳密可登入)。
+
 ### 人工審核(HITL)
 - 敏感工具(調部門、改角色)不直接執行：先建立 pending action,聊天中出現確認卡片
 - 按下確認才執行,執行當下**重新查 DB 驗證權限**、寫入審計日誌;10 分鐘過期;重新整理頁面後卡片狀態從 DB 還原,不會重複執行
@@ -176,6 +182,15 @@ VALUES ('admin@example.com', 'Admin', '<上面的 bcrypt hash>', 'admin');
 ```
 
 之後所有帳號都從 `/admin` 後台開(含一次性臨時密碼、首次登入強制改密)。
+
+### 3b. 模擬企業(demo / 拍片)
+
+```bash
+cd web && npm run seed:demo    # 可重複執行;每次都把 demo 帳號的副作用清乾淨再重建
+```
+
+建出財務部(CFO、小明、阿美)+ 業務部(業務主管、小華、小強)、「A 專案」(看板、檔案、9/3 會議記錄、頻道歷史)、「Q3 財務結算」、每人的工作記憶、小明的自架信箱(greenmail,3 封來信)、財務部共用 skill `finance_report`、故意過度授權的 `payroll_export`(給紅隊收緊)。密碼一律 `demo-1234`。
+需要:Postgres、greenmail(`docker start coworkers-greenmail`)、LLM gateway;跨部門同意流程要 `.env.local` 設 `AGENT_SOCIETY_CROSS_DEPT_HITL=1`。逐場景拍攝步驟:`w.rlong.me/coworker-demo`。
 
 ### 4. 開發慣例
 

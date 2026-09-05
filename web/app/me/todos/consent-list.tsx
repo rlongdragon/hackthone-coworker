@@ -4,10 +4,12 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 
-export type ConsentItem = { id: string; title: string; fromName: string; projectName: string | null; expiresAt: string };
+export type ConsentItem = { id: string; kind: "dispatch" | "ask"; title: string; fromName: string; projectName: string | null; expiresAt: string };
 
-// Cross-department dispatch waiting for MY decision (I am the requester of the
-// pending action, so only I can approve/reject it).
+// Cross-department dispatch OR cross-department agent query waiting for MY
+// decision (I am the requester of the pending action, so only I can
+// approve/reject it). Approving an `ask` runs the scoped sub-run now — the
+// ledger row is written only after consent.
 export function ConsentList({ items }: { items: ConsentItem[] }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -22,12 +24,12 @@ export function ConsentList({ items }: { items: ConsentItem[] }) {
     });
   return (
     <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 dark:bg-amber-950/20" data-testid="consent-list">
-      <div className="mb-2 text-sm font-medium">跨部門指派待你同意 {items.length}</div>
+      <div className="mb-2 text-sm font-medium">跨部門請求待你同意 {items.length}</div>
       <ul className="space-y-2">
         {items.map((it) => (
-          <li key={it.id} className="flex flex-wrap items-center gap-2 text-sm" data-consent-id={it.id}>
+          <li key={it.id} className="flex flex-wrap items-center gap-2 text-sm" data-consent-id={it.id} data-consent-kind={it.kind}>
             <span>
-              <b>{it.fromName}</b> 想指派給你:「{it.title}」
+              <b>{it.fromName}</b> {it.kind === "ask" ? "想問你的代理:" : "想指派給你:"}「{it.title}」
               {it.projectName ? <span className="text-muted-foreground">({it.projectName})</span> : null}
             </span>
             <span className="ml-auto flex gap-1">

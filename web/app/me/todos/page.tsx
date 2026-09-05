@@ -13,12 +13,19 @@ import { ConsentList, type ConsentItem } from "./consent-list";
 // Cross-dept dispatches parked for THIS employee's decision (requester == me).
 async function pendingConsents(userId: string): Promise<ConsentItem[]> {
   const rows = await db
-    .select({ id: pendingActions.id, params: pendingActions.params, expiresAt: pendingActions.expiresAt })
+    .select({ id: pendingActions.id, action: pendingActions.action, params: pendingActions.params, expiresAt: pendingActions.expiresAt })
     .from(pendingActions)
-    .where(and(eq(pendingActions.requesterId, userId), eq(pendingActions.action, "dispatch.assign"), eq(pendingActions.status, "pending"), gt(pendingActions.expiresAt, new Date())))
+    .where(and(eq(pendingActions.requesterId, userId), inArray(pendingActions.action, ["dispatch.assign", "delegation.ask"]), eq(pendingActions.status, "pending"), gt(pendingActions.expiresAt, new Date())))
     .orderBy(desc(pendingActions.createdAt))
     .limit(20);
-  const params = rows.map((r) => r.params as { title?: string; assignedBy?: string; projectId?: string | null });
+  const kinds = rows.map((r) => (r.action === "delegation.ask" ? "ask" : "dispatch") as ConsentItem["kind"]);
+  // dispatch.assign: { title, assignedBy, projectId } · delegation.ask: { callerId, question, scope, purpose }
+  const params = rows.map((r) => {
+    const p = r.params as Record<string, unknown>;
+    return r.action === "delegation.ask"
+      ? { title: `${String(p.question ?? "")}(範圍 ${String(p.scope ?? "team")}${p.purpose ? `,目的:${String(p.purpose)}` : ""})`, assignedBy: p.callerId ? String(p.callerId) : undefined, projectId: null as string | null }
+      : { title: p.title ? String(p.title) : undefined, assignedBy: p.assignedBy ? String(p.assignedBy) : undefined, projectId: p.projectId ? String(p.projectId) : null };
+  });
   const byIds = [...new Set(params.map((p) => p.assignedBy).filter(Boolean))] as string[];
   const projIds = [...new Set(params.map((p) => p.projectId).filter(Boolean))] as string[];
   const [people, projs] = await Promise.all([
@@ -29,6 +36,7 @@ async function pendingConsents(userId: string): Promise<ConsentItem[]> {
   const projOf = new Map(projs.map((p) => [p.id, p.name]));
   return rows.map((r, i) => ({
     id: r.id,
+    kind: kinds[i],
     title: String(params[i].title ?? ""),
     fromName: nameOf.get(params[i].assignedBy ?? "") ?? "?",
     projectName: params[i].projectId ? (projOf.get(params[i].projectId) ?? null) : null,
