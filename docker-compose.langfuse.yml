@@ -1,5 +1,14 @@
-# Self-hosted Langfuse v3 (web + worker + postgres + clickhouse + redis + minio).
+# Self-hosted Langfuse v4 (web + worker + postgres + clickhouse + redis + minio),
+# built from our fork https://github.com/rlongdragon/langfuse (branch feat/live-view):
+# adds a Logfire-style live timeline view at /project/<id>/live.
 # Mirrors the official stack: https://langfuse.com/self-hosting/docker-compose
+#
+# Images are published by the fork's GitHub Actions (.github/workflows/publish-ghcr.yml):
+#   ghcr.io/rlongdragon/langfuse:live-view          (web)
+#   ghcr.io/rlongdragon/langfuse-worker:live-view   (worker)
+# To build them yourself instead of pulling:
+#   docker build -f web/Dockerfile    -t ghcr.io/rlongdragon/langfuse:live-view        https://github.com/rlongdragon/langfuse.git#feat/live-view
+#   docker build -f worker/Dockerfile -t ghcr.io/rlongdragon/langfuse-worker:live-view https://github.com/rlongdragon/langfuse.git#feat/live-view
 #
 # Headless init (LANGFUSE_INIT_*) pre-creates the org/project/user + API keys,
 # so no manual UI signup is needed. All secrets come from .env.langfuse
@@ -10,8 +19,8 @@
 #   UI: http://localhost:3001   login: admin@example.com / $LANGFUSE_INIT_USER_PASSWORD
 #
 # The postgres / clickhouse / redis / minio passwords below are the official
-# Langfuse compose defaults for the internal docker network (no host ports
-# except the UI and minio); rotate them too if you expose this stack.
+# Langfuse compose defaults for the internal docker network (only the UI and
+# minio are published on the host); rotate them too if you expose this stack.
 
 x-langfuse-env: &langfuse-env
   DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
@@ -19,7 +28,7 @@ x-langfuse-env: &langfuse-env
   ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?set in .env.langfuse}
   NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?set in .env.langfuse}
   NEXTAUTH_URL: http://localhost:3001
-  TELEMETRY_ENABLED: "true"
+  TELEMETRY_ENABLED: "false"
   CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
   CLICKHOUSE_URL: http://clickhouse:8123
   CLICKHOUSE_USER: clickhouse
@@ -35,19 +44,31 @@ x-langfuse-env: &langfuse-env
   LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
   LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
   LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
+x-langfuse-depends-on: &langfuse-depends-on
+  postgres: { condition: service_healthy }
+  clickhouse: { condition: service_healthy }
+  minio: { condition: service_healthy }
+  redis: { condition: service_healthy }
 
 services:
   langfuse-web:
-    image: langfuse/langfuse:3
-    depends_on:
-      postgres: { condition: service_healthy }
-      clickhouse: { condition: service_healthy }
-      minio: { condition: service_healthy }
-      redis: { condition: service_healthy }
+    image: ghcr.io/rlongdragon/langfuse:live-view
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
     ports:
       - "3001:3000"
     environment:
       <<: *langfuse-env
+      # browser-reachable media endpoint (minio published on host :9090)
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
       # --- headless bootstrap: org + project + user + fixed API keys ---
       LANGFUSE_INIT_ORG_ID: coworker-org
       LANGFUSE_INIT_ORG_NAME: Coworker
@@ -60,16 +81,14 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:?set in .env.langfuse}
 
   langfuse-worker:
-    image: langfuse/langfuse-worker:3
-    depends_on:
-      postgres: { condition: service_healthy }
-      clickhouse: { condition: service_healthy }
-      minio: { condition: service_healthy }
-      redis: { condition: service_healthy }
+    image: ghcr.io/rlongdragon/langfuse-worker:live-view
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
     environment: *langfuse-env
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:17
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -79,13 +98,17 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
     volumes:
       - langfuse_postgres:/var/lib/postgresql/data
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24
+    image: clickhouse/clickhouse-server:25.12
+    restart: unless-stopped
     user: "101:101"
     environment:
+      CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
       CLICKHOUSE_PASSWORD: clickhouse
     healthcheck:
@@ -99,6 +122,7 @@ services:
 
   minio:
     image: minio/minio
+    restart: unless-stopped
     environment:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: miniosecret
@@ -109,23 +133,27 @@ services:
       retries: 10
     ports:
       - "9090:9000"
-      - "9091:9001"
+      - "127.0.0.1:9091:9001"
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server /data --console-address ":9001"'
     volumes:
       - langfuse_minio:/data
 
   redis:
-    image: redis:7-alpine
-    command: --requirepass myredissecret
+    image: redis:7
+    restart: unless-stopped
+    command: --requirepass myredissecret --maxmemory-policy noeviction
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "myredissecret", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
+    volumes:
+      - langfuse_redis:/data
 
 volumes:
   langfuse_postgres:
   langfuse_clickhouse_data:
   langfuse_clickhouse_logs:
   langfuse_minio:
+  langfuse_redis:
