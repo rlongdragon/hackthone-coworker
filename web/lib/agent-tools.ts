@@ -35,6 +35,8 @@ import {
   principalOf,
   resolveCoworker,
 } from "@/lib/delegation";
+import { pepIntersection, recordQueryAudit, type ScopeLabel } from "@/lib/pep";
+import { notifyQuery } from "@/lib/notifications";
 import { asUuid } from "@/lib/validate";
 
 const tracer = trace.getTracer("coworker-agent");
@@ -323,16 +325,61 @@ export function makeTools(
     }),
     askCoworker: tool({
       description:
-        "把一個問題委派給另一位同事的 AI 代理回答(用同事姓名或部門名指定 target)。對方會在『你 ∩ 對方』的交集權限下作答:只會用到你們雙方都有權使用的工具與資料,超出你權限的東西對方即使有也拿不到、會直接拒絕。適用於你需要別人/別部門協助、但仍必須受你自己權限約束的情況。回傳 answer(對方回覆)與 droppedTools(因你權限而被移除的工具)。",
+        "把一個問題委派給另一位同事的 AI 代理回答(用同事姓名或部門名指定 target)。務必依問題內容標好 scope:" +
+        "project=專案/任務進度、team=團隊會議/事務、private=對方個人事務、sensitive=請假原因/健康/薪資等敏感資訊。" +
+        "系統會在模型之外強制『你 ∩ 對方』的權限交集:sensitive/private 只有本人能存取(任何角色都擋、無 HITL 例外);" +
+        "每次查詢(允許或拒絕)都會寫進帳本並『通知被查的當事人』。回傳 answer、droppedFields(被擋的欄位)、droppedTools。",
       inputSchema: z.object({
         target: z.string().max(100).describe("同事姓名,或部門名稱"),
         question: z.string().max(500).describe("要委派的問題,zh-TW"),
+        scope: z
+          .enum(["project", "team", "private", "sensitive"])
+          .describe("這個問題問的是對方的哪一類資訊"),
+        purpose: z
+          .string()
+          .max(120)
+          .optional()
+          .describe("一句話說明查詢目的(正規化意圖,不是原始提問)"),
       }),
-      execute: ({ target, question }) =>
-        span("tool.askCoworker", { employeeId, "deleg.target": target }, async (set) => {
+      execute: ({ target, question, scope, purpose }) =>
+        span("tool.askCoworker", { employeeId, "deleg.target": target, "deleg.scope": scope }, async (set) => {
           const callee = await resolveCoworker(employeeId, target);
           if (!callee) return { ok: false, error: `找不到名為「${target}」的同事或部門。` };
           const caller = await principalOf(employeeId);
+          const normPurpose = purpose?.trim() || `查詢${scope}相關資訊`;
+
+          // Scope-intersection PEP (enforced outside the model) + transparent
+          // ledger. The decision is recorded and the SUBJECT notified BEFORE any
+          // answer — 不留紀錄 = 不執行. sensitive/private are self-only.
+          const decision = await pepIntersection(employeeId, callee.id, scope as ScopeLabel, normPurpose);
+          const audit = await recordQueryAudit({
+            callerId: employeeId,
+            subjectId: callee.id,
+            scope: scope as ScopeLabel,
+            purpose: normPurpose,
+            allowed: decision.allowed,
+            deniedFields: decision.deniedFields,
+          });
+          await notifyQuery({
+            subjectId: callee.id,
+            actorId: employeeId,
+            actorName: caller?.name ?? "一位同事",
+            scope: scope as ScopeLabel,
+            allowed: decision.allowed,
+            purpose: normPurpose,
+            auditId: audit.id,
+          });
+          set({ "deleg.scopeAllowed": decision.allowed });
+          if (!decision.allowed) {
+            return {
+              ok: false,
+              denied: true,
+              error: `權限交集拒絕:${decision.deniedReason}`,
+              droppedFields: decision.deniedFields,
+              note: `已記入帳本並通知 ${callee.name}:你的代理查詢了他的「${scope}」— 已拒絕。`,
+            };
+          }
+
           const crossDept =
             !!caller?.departmentId && caller.departmentId !== callee.departmentId;
           // Optional cross-department consent gate: the callee must approve
@@ -362,7 +409,7 @@ export function makeTools(
             from: r.from,
             answer: r.answer,
             droppedTools: r.droppedTools,
-            note: "對方在你們的交集權限下作答;droppedTools 是因你權限不足而被移除、對方不能替你使用的工具。",
+            note: `對方在你們的交集權限下作答(scope=${scope},已允許並通知當事人);droppedTools 是因你權限不足被移除的工具。`,
           };
         }),
     }),

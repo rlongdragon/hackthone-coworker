@@ -322,13 +322,25 @@ export async function runRedTeam(opts?: {
 // of its own; it must only be reached from an admin-gated red-team flow
 // (runRedTeamAction → requireAdmin), never wired directly to an agent tool or a
 // tool-output-driven path, or it becomes an unauthenticated tool-block DoS.
-export async function autoTightenTool(serverId: string, toolName: string): Promise<void> {
-  await setToolPolicy(serverId, toolName, "blocked");
+// Severity maps to how hard we clamp: high → blocked, otherwise → hitl.
+export async function autoTightenTool(
+  serverId: string,
+  toolName: string,
+  severity: Severity = "high",
+): Promise<"blocked" | "hitl"> {
+  const to = severity === "high" ? "blocked" : "hitl";
+  await setToolPolicy(serverId, toolName, to);
   await db.insert(auditLog).values({
     employeeId: null,
     action: "redteam.autotighten",
-    detail: { serverId, toolName, to: "blocked" },
+    detail: { serverId, toolName, to, severity },
   });
+  return to;
+}
+
+// P3 alias: run the self-red-team against one live agent (scoped, persisted).
+export async function runSelfRedTeam(agentId: string) {
+  return runRedTeam({ targetIds: [agentId], persist: true });
 }
 
 // ---- dashboard reads -------------------------------------------------------

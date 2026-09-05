@@ -91,6 +91,10 @@ export const todos = pgTable(
     // set when a handover reassigned this row — lets a second-stage handover
     // forward exactly the parked items, never the custodian's own work
     handoverId: uuid("handover_id"),
+    // a2a-ledger P4-lite: manager dispatch. assignedBy = who assigned it;
+    // status tracks the dispatched item's lifecycle (done kept for back-compat).
+    assignedBy: uuid("assigned_by").references(() => employees.id, { onDelete: "set null" }),
+    status: text("status").notNull().default("assigned"), // assigned | in_progress | done
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (t) => [index("todos_emp_idx").on(t.employeeId)],
@@ -118,6 +122,10 @@ export const memories = pgTable(
     provenance: text("provenance").notNull().default("trusted"), // trusted | untrusted_derived
     sourceAgentId: uuid("source_agent_id").references(() => employees.id), // which agent's context derived it
     quarantined: boolean("quarantined").notNull().default(false),
+    // a2a-ledger P2: link a memory back to the collab event it was distilled
+    // from, and mark which extracted fields came from tainted (untrusted) input.
+    collabEventId: uuid("collab_event_id"),
+    taintedSourceFields: jsonb("tainted_source_fields").$type<Record<string, boolean>>(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (t) => [
@@ -552,12 +560,26 @@ export const pendingActions = pgTable(
   (t) => [index("pending_actions_req_idx").on(t.requesterId, t.status)],
 );
 
+// Write-time scope label on collaborative data + A2A queries. Coarser than the
+// tool-visibility model: it classifies WHAT is being asked about, so a query for
+// a subject's `sensitive` data (leave reason, health) is refused regardless of
+// the caller's role, while `project`/`team` follow membership.
+export const scopeLabelEnum = pgEnum("scope_label", ["project", "team", "private", "sensitive"]);
+
 // NFR-AUDITABILITY: every meaningful action logged.
+// a2a-ledger: query_scope/query_allowed/denied_fields make audit_log double as
+// the transparent A2A ledger — an allowed OR denied cross-agent query is one row.
 export const auditLog = pgTable("audit_log", {
   id: uuid("id").defaultRandom().primaryKey(),
   employeeId: uuid("employee_id").references(() => employees.id),
   action: text("action").notNull(),
   detail: jsonb("detail"),
+  // Set on A2A ledger rows (action = "a2a.query"): the subject queried about,
+  // the scope requested, whether it was allowed, and which fields were blocked.
+  subjectId: uuid("subject_id").references(() => employees.id),
+  queryScope: scopeLabelEnum("query_scope"),
+  queryAllowed: boolean("query_allowed"),
+  deniedFields: jsonb("denied_fields").$type<string[]>(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -591,5 +613,74 @@ export const attackFindings = pgTable(
   (t) => [
     index("attack_findings_target_idx").on(t.targetId),
     index("attack_findings_created_idx").on(t.createdAt),
+  ],
+);
+
+// ============================================================================
+// A2A + transparent ledger (feat/a2a-ledger)
+//   Core constraint: 不留紀錄 = 不執行 (no record = no execution). Every A2A
+//   query — allowed OR denied — is written to audit_log as a side-effect of the
+//   PEP, and the SUBJECT is notified. The subject seeing DENIED queries about
+//   them is the genuinely novel bit (no shipped product / law does this).
+// ============================================================================
+
+export const notificationTypeEnum = pgEnum("notification_type", [
+  "query_allowed",
+  "query_denied",
+  "task_assigned",
+  "message_mention",
+]);
+
+// The transparency channel: a subject is told when another agent queried about
+// them, at what scope, for what purpose, and whether it was allowed or denied.
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    recipientId: uuid("recipient_id")
+      .notNull()
+      .references(() => employees.id, { onDelete: "cascade" }),
+    actorId: uuid("actor_id").references(() => employees.id, { onDelete: "set null" }),
+    type: notificationTypeEnum("type").notNull(),
+    scope: scopeLabelEnum("scope"),
+    // Normalized intent, NEVER the raw prompt (which could carry injected text).
+    purpose: text("purpose"),
+    auditId: uuid("audit_id"), // link back to the ledger row
+    readAt: timestamp("read_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [
+    index("notifications_recipient_idx").on(t.recipientId, t.readAt),
+    index("notifications_created_idx").on(t.createdAt),
+  ],
+);
+
+// Normalized ingestion layer: every inbound collaborative artefact lands here
+// with a write-time scope label and a taint flag (untrusted at the boundary,
+// never re-classified downstream). P2 bones — extractors fill extractedData.
+export const collabSourceEnum = pgEnum("collab_source", [
+  "mail",
+  "meeting_asr",
+  "telegram_group",
+  "in_app_chat",
+  "manager_dispatch",
+]);
+
+export const collabEvents = pgTable(
+  "collab_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    sourceType: collabSourceEnum("source_type").notNull(),
+    sourceId: text("source_id"),
+    scopeLabel: scopeLabelEnum("scope_label").notNull(),
+    createdBy: uuid("created_by").references(() => employees.id, { onDelete: "set null" }),
+    contentHash: text("content_hash"), // taint-tracking pin (rug-pull style)
+    isTainted: boolean("is_tainted").notNull().default(false),
+    extractedData: jsonb("extracted_data"), // { decisions:[], tasks:[] }
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [
+    index("collab_events_source_idx").on(t.sourceType),
+    index("collab_events_scope_idx").on(t.scopeLabel),
   ],
 );

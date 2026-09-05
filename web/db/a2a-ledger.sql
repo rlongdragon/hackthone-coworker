@@ -1,0 +1,53 @@
+-- feat/a2a-ledger migration (P0–P3). Idempotent; apply out-of-band:
+--   docker exec -i coworkers-db-1 psql -U coworker -d coworker < db/a2a-ledger.sql
+
+DO $$ BEGIN CREATE TYPE scope_label AS ENUM ('project','team','private','sensitive');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE TYPE notification_type AS ENUM ('query_allowed','query_denied','task_assigned','message_mention');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE TYPE collab_source AS ENUM ('mail','meeting_asr','telegram_group','in_app_chat','manager_dispatch');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- transparent ledger: subject-visible notifications
+CREATE TABLE IF NOT EXISTS notifications (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  recipient_id uuid NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  actor_id uuid REFERENCES employees(id) ON DELETE SET NULL,
+  type notification_type NOT NULL,
+  scope scope_label,
+  purpose text,
+  audit_id uuid,
+  read_at timestamp,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS notifications_recipient_idx ON notifications (recipient_id, read_at);
+CREATE INDEX IF NOT EXISTS notifications_created_idx ON notifications (created_at);
+
+-- ingestion bones
+CREATE TABLE IF NOT EXISTS collab_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_type collab_source NOT NULL,
+  source_id text,
+  scope_label scope_label NOT NULL,
+  created_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  content_hash text,
+  is_tainted boolean NOT NULL DEFAULT false,
+  extracted_data jsonb,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS collab_events_source_idx ON collab_events (source_type);
+CREATE INDEX IF NOT EXISTS collab_events_scope_idx ON collab_events (scope_label);
+
+-- audit_log doubles as the A2A ledger
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS subject_id uuid REFERENCES employees(id);
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS query_scope scope_label;
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS query_allowed boolean;
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS denied_fields jsonb;
+
+-- memory ↔ collab event lineage + field taint
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS collab_event_id uuid;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS tainted_source_fields jsonb;
+
+-- manager dispatch (P4-lite)
+ALTER TABLE todos ADD COLUMN IF NOT EXISTS assigned_by uuid REFERENCES employees(id);
+ALTER TABLE todos ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'assigned';

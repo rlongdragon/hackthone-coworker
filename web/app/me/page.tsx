@@ -92,6 +92,12 @@ export default async function DashboardPage() {
         <h1 className="text-xl font-semibold tracking-tight">
           {user.name},今天是 {label}
         </h1>
+        <Link
+          href="/me/ledger"
+          className="text-muted-foreground hover:text-foreground ml-auto text-sm underline"
+        >
+          關於我的查詢紀錄 →
+        </Link>
       </div>
 
       <div className="space-y-4">
