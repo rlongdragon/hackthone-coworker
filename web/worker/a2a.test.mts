@@ -4,7 +4,8 @@
 import { eq, inArray, or } from "drizzle-orm";
 import { db } from "../db";
 import { auditLog, collabEvents, departments, employees, projectMembers, projects } from "../db/schema";
-import { pepIntersection, recordQueryAudit, listQueriesAboutMe, auditSummary } from "../lib/pep";
+import { pepIntersection, recordQueryAudit, listQueriesAboutMe, auditSummary, detectMinimumScope, stricterScope } from "../lib/pep";
+import { runScopedAsk } from "../lib/delegation";
 import { notifyQuery, getMyNotifications, unreadCount, markNotificationRead, markAllRead } from "../lib/notifications";
 import { ingestCollabEvent, extractDecisionsAndTasks } from "../lib/collab-events";
 
@@ -85,6 +86,26 @@ try {
   check("recipient can mark own notification read", await markNotificationRead(someNotif, sub));
   const cleared = await markAllRead(sub);
   check("mark-all-read clears the rest", cleared >= 1 && (await unreadCount(sub)) === 0, cleared);
+
+  // ---- 3b. F1: content-floor stops scope MISLABELLING ----------------------
+  check("detectMinimumScope flags a leave question as sensitive", detectMinimumScope("小明最近為什麼請假") === "sensitive");
+  check("detectMinimumScope leaves a plain project question at project", detectMinimumScope("A 專案進度如何") === "project");
+  check("stricterScope ratchets up, never down", stricterScope("project", "sensitive") === "sensitive" && stricterScope("sensitive", "project") === "sensitive");
+  // manager mislabels a sensitive question as "project" → runScopedAsk must
+  // escalate + DENY, and record it as sensitive/denied (not a benign project row).
+  const mgrName = (await db.select({ name: employees.name }).from(employees).where(eq(employees.id, sub)))[0].name;
+  const mislabel = await runScopedAsk({ callerId: mgr, target: mgrName, question: "小明最近為什麼請假?", scope: "project", chain: [mgr] });
+  check("mislabelled sensitive-as-project is DENIED", !mislabel.ok && "denied" in mislabel && mislabel.denied === true, mislabel);
+  check("mislabel recorded under the escalated (sensitive) scope", mislabel.scope === "sensitive", mislabel.scope);
+  const ledgerAfterMislabel = await listQueriesAboutMe(sub, { includeDenied: true });
+  check("mislabelled query landed on the ledger as denied+sensitive", ledgerAfterMislabel.some((r) => r.scope === "sensitive" && !r.allowed));
+
+  // ---- 3c. F2: every runScopedAsk (incl. nested chains) records + notifies --
+  const beforeCount = (await listQueriesAboutMe(sub, { includeDenied: true })).length;
+  // simulate a nested (depth-2) delegation reaching the same subject
+  await runScopedAsk({ callerId: mgr, target: mgrName, question: "小明的健康狀況?", scope: "team", chain: [admin, mgr] });
+  const afterCount = (await listQueriesAboutMe(sub, { includeDenied: true })).length;
+  check("nested-depth runScopedAsk still writes a ledger row", afterCount === beforeCount + 1, { beforeCount, afterCount });
 
   // ---- 4. ingestion bones: write-time scope + taint + extraction ------------
   const ev = await ingestCollabEvent({

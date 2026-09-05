@@ -51,6 +51,9 @@ export type Extraction = {
   decisions: string[];
   // action items; each marked needsConfirm until a human validates.
   tasks: { title: string; assignee?: string; needsConfirm: boolean }[];
+  // provenance: derived from an untrusted (tainted) source event? Carried so the
+  // derived artefacts don't lose the untrusted lineage of their origin.
+  tainted: boolean;
 };
 
 // Distil decisions + action items from a collab event with the self-hosted
@@ -60,7 +63,10 @@ export async function extractDecisionsAndTasks(
   eventId: string,
   content: string,
 ): Promise<Extraction> {
-  let parsed: Extraction = { decisions: [], tasks: [] };
+  // Inherit the source event's taint so derived items keep untrusted lineage.
+  const [ev] = await db.select({ isTainted: collabEvents.isTainted }).from(collabEvents).where(eq(collabEvents.id, eventId)).limit(1);
+  const tainted = ev?.isTainted ?? true; // unknown event → treat as tainted (fail-safe)
+  let parsed: Extraction = { decisions: [], tasks: [], tainted };
   try {
     const res = await generateText({
       model,
@@ -79,6 +85,7 @@ export async function extractDecisionsAndTasks(
           .filter((t) => t && typeof t.title === "string")
           .slice(0, 20)
           .map((t) => ({ title: t.title!, assignee: t.assignee, needsConfirm: true })),
+        tainted,
       };
     }
   } catch {

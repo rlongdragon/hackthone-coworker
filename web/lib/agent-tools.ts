@@ -29,14 +29,8 @@ import { findVisibleTool, type ActionSpec } from "@/lib/tool-store";
 import { executeAction, runSkill } from "@/lib/tool-runtime";
 import { saveMemory, searchMemories } from "@/lib/memory-store";
 import { askSuccessorQuestion } from "@/lib/handover-gaps";
-import {
-  askCoworker as delegateAsk,
-  crossDeptHitlEnabled,
-  principalOf,
-  resolveCoworker,
-} from "@/lib/delegation";
-import { pepIntersection, recordQueryAudit, type ScopeLabel } from "@/lib/pep";
-import { notifyQuery } from "@/lib/notifications";
+import { runScopedAsk } from "@/lib/delegation";
+import { type ScopeLabel } from "@/lib/pep";
 import { asUuid } from "@/lib/validate";
 
 const tracer = trace.getTracer("coworker-agent");
@@ -343,73 +337,52 @@ export function makeTools(
       }),
       execute: ({ target, question, scope, purpose }) =>
         span("tool.askCoworker", { employeeId, "deleg.target": target, "deleg.scope": scope }, async (set) => {
-          const callee = await resolveCoworker(employeeId, target);
-          if (!callee) return { ok: false, error: `找不到名為「${target}」的同事或部門。` };
-          const caller = await principalOf(employeeId);
-          const normPurpose = purpose?.trim() || `查詢${scope}相關資訊`;
-
-          // Scope-intersection PEP (enforced outside the model) + transparent
-          // ledger. The decision is recorded and the SUBJECT notified BEFORE any
-          // answer — 不留紀錄 = 不執行. sensitive/private are self-only.
-          const decision = await pepIntersection(employeeId, callee.id, scope as ScopeLabel, normPurpose);
-          const audit = await recordQueryAudit({
+          // Content-floored scope-PEP + transparent ledger + subject notify all
+          // happen inside runScopedAsk (one enforcement path for every entry
+          // point). The subject is recorded + notified BEFORE any answer runs.
+          const r = await runScopedAsk({
             callerId: employeeId,
-            subjectId: callee.id,
+            target,
+            question,
             scope: scope as ScopeLabel,
-            purpose: normPurpose,
-            allowed: decision.allowed,
-            deniedFields: decision.deniedFields,
+            purpose,
+            chain: [employeeId],
+            allowHitl: true,
           });
-          await notifyQuery({
-            subjectId: callee.id,
-            actorId: employeeId,
-            actorName: caller?.name ?? "一位同事",
-            scope: scope as ScopeLabel,
-            allowed: decision.allowed,
-            purpose: normPurpose,
-            auditId: audit.id,
-          });
-          set({ "deleg.scopeAllowed": decision.allowed });
-          if (!decision.allowed) {
+          set({ "deleg.ok": r.ok, "deleg.scope": r.scope ?? scope });
+          if (r.ok) {
             return {
-              ok: false,
-              denied: true,
-              error: `權限交集拒絕:${decision.deniedReason}`,
-              droppedFields: decision.deniedFields,
-              note: `已記入帳本並通知 ${callee.name}:你的代理查詢了他的「${scope}」— 已拒絕。`,
+              ok: true,
+              from: r.from,
+              answer: r.answer,
+              droppedTools: r.droppedTools,
+              note: `對方在你們的交集權限下作答(scope=${r.scope},已允許並通知當事人);droppedTools 是因你權限不足被移除的工具。`,
             };
           }
-
-          const crossDept =
-            !!caller?.departmentId && caller.departmentId !== callee.departmentId;
-          // Optional cross-department consent gate: the callee must approve
-          // before their agent answers (reuses the HITL approval + Telegram
-          // buttons). The intersected scope still applies after consent.
-          if (crossDeptHitlEnabled() && crossDept) {
-            const p = await createPendingAction(callee.id, "delegation.ask", {
+          if ("needsHitl" in r && r.needsHitl) {
+            const p = await createPendingAction(r.calleeId, "delegation.ask", {
               callerId: employeeId,
               chain: [employeeId],
               question,
               target,
+              scope: r.scope,
+              purpose: r.purpose,
             });
             set({ "deleg.needsApproval": true });
             return {
               needsApproval: true,
               approvalId: p.id,
-              summary: `等待 ${callee.name} 同意跨部門委派`,
+              summary: `等待 ${r.calleeName} 同意跨部門委派`,
               expiresAt: p.expiresAt.toISOString(),
-              note: `已請 ${callee.name} 在他的對話中確認是否受理這個跨部門委派。`,
+              note: `已請 ${r.calleeName} 在他的對話中確認是否受理這個跨部門委派(scope=${r.scope})。`,
             };
           }
-          const r = await delegateAsk({ chain: [employeeId], target, question });
-          set({ "deleg.ok": r.ok });
-          if (!r.ok) return { ok: false, error: r.error };
           return {
-            ok: true,
-            from: r.from,
-            answer: r.answer,
-            droppedTools: r.droppedTools,
-            note: `對方在你們的交集權限下作答(scope=${scope},已允許並通知當事人);droppedTools 是因你權限不足被移除的工具。`,
+            ok: false,
+            denied: r.denied ?? false,
+            error: r.error,
+            droppedFields: "droppedFields" in r ? r.droppedFields : undefined,
+            note: r.denied ? "已記入帳本並通知當事人:此查詢被拒絕。" : undefined,
           };
         }),
     }),

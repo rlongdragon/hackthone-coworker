@@ -1,7 +1,7 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte } from "drizzle-orm";
 import { db } from "@/db";
 import { auditLog, projectMembers } from "@/db/schema";
-import { principalOf, type Principal } from "@/lib/delegation";
+import { principalOf, type Principal } from "@/lib/principal";
 import { pepEnforced } from "@/lib/tool-store";
 
 // ============================================================================
@@ -27,6 +27,30 @@ export type PepDecision = {
 // Illustrative sensitive fields a subject-scope query would touch (for the
 // ledger/notification, so the subject sees exactly what was blocked).
 const SENSITIVE_FIELDS = ["leave_reason", "health", "salary", "personal_contact"];
+
+// Restrictiveness order: project (least) → sensitive (most). Used to take the
+// STRICTER of the model-declared scope and a content-derived floor, so a caller
+// cannot widen access by MISLABELLING a sensitive question as "project" — the
+// content floor can only raise restrictiveness, never lower it (same one-way
+// ratchet as the MCP audit's `stricter`).
+const SCOPE_RANK: Record<ScopeLabel, number> = { project: 0, team: 1, private: 2, sensitive: 3 };
+
+export function stricterScope(a: ScopeLabel, b: ScopeLabel): ScopeLabel {
+  return SCOPE_RANK[a] >= SCOPE_RANK[b] ? a : b;
+}
+
+// Deterministic content floor: scan the question for markers of a more sensitive
+// topic than the caller declared. Never LOWERS the declared scope (returns
+// "project" = the floor when nothing matches, and stricterScope keeps the higher).
+const SENSITIVE_RE =
+  /請假|休假|病假|事假|離職|辭職|資遣|健康|病歷|診斷|懷孕|生病|薪水|薪資|薪酬|工資|獎金|離婚|家暴|leave|salary|payroll|compensation|bonus|health|medical|sick|resign|diagnos|pregnan/i;
+const PRIVATE_RE = /私人|個人(電話|住址|地址)|住家|住址|家庭|home\s*address|personal\s*(phone|contact|address)/i;
+
+export function detectMinimumScope(question: string): ScopeLabel {
+  if (SENSITIVE_RE.test(question)) return "sensitive";
+  if (PRIVATE_RE.test(question)) return "private";
+  return "project";
+}
 
 async function projectsOf(id: string): Promise<Set<string>> {
   const rows = await db
@@ -180,11 +204,10 @@ export async function auditSummary(days = 30): Promise<{
   byScope: Record<string, { allowed: number; denied: number }>;
 }> {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const rows = await db
-    .select({ scope: auditLog.queryScope, allowed: auditLog.queryAllowed, createdAt: auditLog.createdAt })
+  const recent = await db
+    .select({ scope: auditLog.queryScope, allowed: auditLog.queryAllowed })
     .from(auditLog)
-    .where(eq(auditLog.action, "a2a.query"));
-  const recent = rows.filter((r) => r.createdAt >= since);
+    .where(and(eq(auditLog.action, "a2a.query"), gte(auditLog.createdAt, since)));
   const byScope: Record<string, { allowed: number; denied: number }> = {};
   let denied = 0;
   for (const r of recent) {

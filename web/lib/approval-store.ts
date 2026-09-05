@@ -4,7 +4,8 @@ import { auditLog, departments, employees, pendingActions } from "@/db/schema";
 import { findVisibleToolById } from "@/lib/tool-store";
 import { executeAction } from "@/lib/tool-runtime";
 import { resolveAgentTool, runMcpToolGuarded } from "@/lib/mcp-exec";
-import { runDelegatedTurn } from "@/lib/delegation";
+import { runScopedAsk } from "@/lib/delegation";
+import type { ScopeLabel } from "@/lib/pep";
 
 const TTL_MS = 10 * 60 * 1000;
 
@@ -135,24 +136,18 @@ const ACTIONS: Record<string, ActionDef> = {
     execute: async (params, actorId) => {
       const callerId = String(params.callerId ?? "");
       const question = String(params.question ?? "");
+      const target = String(params.target ?? "");
+      const scope = (String(params.scope ?? "team") as ScopeLabel);
+      const purpose = params.purpose ? String(params.purpose) : undefined;
       const chain = Array.isArray(params.chain) ? params.chain.map(String) : [callerId];
-      const r = await runDelegatedTurn({ calleeId: actorId, question, chain });
-      await db.insert(auditLog).values({
-        employeeId: callerId,
-        action: "delegation.ask",
-        detail: {
-          callerId,
-          calleeId: actorId,
-          chain: [...chain, actorId],
-          via: "cross-dept-approval",
-          effectiveRole: r.effectiveRole,
-          exposedTools: r.exposedTools,
-          droppedTools: r.droppedTools,
-          ok: r.ok,
-        },
-      });
-      if (!r.ok) return { ok: false, message: r.text };
-      return { ok: true, message: `已同意並在交集權限下回覆:${r.text.slice(0, 500)}` };
+      // Post-consent: run the full scoped path now (ledger + subject notify are
+      // written HERE, after the callee approved — never pre-recorded as allowed).
+      // allowHitl:false so it actually executes rather than re-parking. actorId
+      // is the consenting callee; runScopedAsk re-resolves + re-checks the PEP.
+      const r = await runScopedAsk({ callerId, target, question, scope, purpose, chain, allowHitl: false });
+      void actorId;
+      if (!r.ok) return { ok: false, message: "error" in r ? r.error : "委派未成立" };
+      return { ok: true, message: `已同意並在交集權限下回覆:${r.answer.slice(0, 500)}` };
     },
   },
 };

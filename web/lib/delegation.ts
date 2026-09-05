@@ -11,64 +11,39 @@ import {
   type ActionSpec,
 } from "@/lib/tool-store";
 import { executeAction, runSkill } from "@/lib/tool-runtime";
+import {
+  ROLE_RANK,
+  effectiveRole,
+  principalOf,
+  scopeGrants,
+  type Principal,
+} from "@/lib/principal";
+import {
+  pepIntersection,
+  recordQueryAudit,
+  stricterScope,
+  detectMinimumScope,
+  type ScopeLabel,
+} from "@/lib/pep";
+import { notifyQuery } from "@/lib/notifications";
 
 // ============================================================================
-// Governed delegation (agent-society · Pillar 1)
+// Governed delegation (agent-society · Pillar 1) + scoped A2A (a2a-ledger)
 //
 // An employee's agent can delegate a question to a COWORKER's agent, which runs
 // as a bounded SUB-RUN. The sub-run's authority is the INTERSECTION of every
 // principal in the delegation chain (caller ∩ callee ∩ …), computed at the tool
 // boundary in tool-store.listVisibleTools — never asserted in the system prompt.
-// The chain can only ATTENUATE: each hop appends a principal, and intersection
-// is monotone-decreasing, so a delegate can never do more than the person who
-// asked. Provenance (who asked whom, under what effective scope, what was
-// dropped) is written to the audit log.
+// The chain can only ATTENUATE. `runScopedAsk` wraps a delegation with the A2A
+// scope-PEP + transparent ledger + subject notification, and is used by EVERY
+// entry point (top-level tool, nested delegation, HITL consent executor) so the
+// ledger/notification can never be skipped and the scope is content-floored.
 // ============================================================================
 
-export const ROLE_RANK = { employee: 0, manager: 1, admin: 2 } as const;
+export { ROLE_RANK, effectiveRole, principalOf, scopeGrants };
+export type { Principal };
+
 const MAX_DEPTH = 3; // origin → … : at most 3 principals deep
-
-export type Principal = {
-  id: string;
-  name: string;
-  role: string;
-  departmentId: string | null;
-  deptName: string | null;
-  active: boolean;
-};
-
-export async function principalOf(id: string): Promise<Principal | null> {
-  const [r] = await db
-    .select({
-      id: employees.id,
-      name: employees.name,
-      role: employees.role,
-      departmentId: employees.departmentId,
-      deptName: departments.name,
-      active: employees.active,
-    })
-    .from(employees)
-    .leftJoin(departments, eq(employees.departmentId, departments.id))
-    .where(eq(employees.id, id))
-    .limit(1);
-  return r ?? null;
-}
-
-// The scope grants a principal holds, as opaque strings — used for the audit
-// trail and the permission-graph auditor. Mirrors tool-store visibility rules.
-export function scopeGrants(p: Principal): string[] {
-  const g = [`role:${p.role}`, `personal:${p.id}`, "org"];
-  if (p.departmentId) g.push(`dept:${p.departmentId}`);
-  return g;
-}
-
-// The effective role of a delegation chain = the LOWEST role in it. A low-priv
-// caller can never borrow a high-priv callee's role.
-export function effectiveRole(principals: Principal[]): string {
-  let rank: number = ROLE_RANK.admin;
-  for (const p of principals) rank = Math.min(rank, ROLE_RANK[p.role as keyof typeof ROLE_RANK] ?? 0);
-  return (Object.keys(ROLE_RANK) as (keyof typeof ROLE_RANK)[]).find((k) => ROLE_RANK[k] === rank) ?? "employee";
-}
 
 // Resolve a coworker to delegate to. Accepts an employee name (exact, case-
 // insensitive) or a department name (→ that department's manager, else any
@@ -178,10 +153,25 @@ function makeDelegateTools(calleeId: string, chain: string[]): ToolSet {
   if (canRecurse) {
     tools.askCoworker = tool({
       description:
-        "Delegate further to another coworker's agent. Your (already restricted) scope only narrows again.",
-      inputSchema: z.object({ target: z.string().max(100), question: z.string().max(500) }),
-      execute: async ({ target, question }) => {
-        const r = await askCoworker({ chain: [...chain, calleeId], target, question });
+        "Delegate further to another coworker's agent. Label the scope honestly (project/team/private/sensitive). " +
+        "Your (already restricted) scope only narrows again, and this nested query is also scope-checked, recorded to the ledger, and notified to the subject.",
+      inputSchema: z.object({
+        target: z.string().max(100),
+        question: z.string().max(500),
+        scope: z.enum(["project", "team", "private", "sensitive"]),
+        purpose: z.string().max(120).optional(),
+      }),
+      execute: async ({ target, question, scope, purpose }) => {
+        // Nested delegation goes through the SAME scope-PEP + ledger + notify as
+        // the top level — no depth≥2 bypass of the transparency guarantees.
+        const r = await runScopedAsk({
+          callerId: calleeId,
+          target,
+          question,
+          scope: scope as ScopeLabel,
+          purpose,
+          chain: [...chain, calleeId],
+        });
         return r;
       },
     });
@@ -304,4 +294,72 @@ export async function askCoworker(input: {
 
 export function crossDeptHitlEnabled(): boolean {
   return process.env.AGENT_SOCIETY_CROSS_DEPT_HITL === "1";
+}
+
+export type ScopedAskResult =
+  | { ok: true; from: string; answer: string; scope: ScopeLabel; droppedTools: string[] }
+  // The caller must obtain cross-department consent first; ledger/notify are
+  // deferred to the consent executor so a rejected query is never recorded as
+  // "allowed" (F3). The tool parks a pending action from this.
+  | { ok: false; needsHitl: true; calleeId: string; calleeName: string; scope: ScopeLabel; purpose: string }
+  | { ok: false; denied?: boolean; needsHitl?: false; error: string; scope?: ScopeLabel; droppedFields?: string[] };
+
+// The single A2A entry point: content-floored scope-PEP → ledger → subject
+// notification → tool-intersection sub-run. Used by the top-level askCoworker
+// tool, nested delegation, AND the cross-dept HITL consent executor, so the
+// ledger/notification can never be skipped (P0-3 "no record = no execute") and
+// the effective scope is never below what the QUESTION CONTENT demands (F1: the
+// model-declared scope can only be ratcheted stricter, never used to launder a
+// sensitive question as "project"). `allowHitl` is true for user-facing entry
+// points; the consent executor passes false to actually run post-approval.
+export async function runScopedAsk(input: {
+  callerId: string;
+  target: string;
+  question: string;
+  scope: ScopeLabel;
+  purpose?: string;
+  chain: string[];
+  allowHitl?: boolean;
+}): Promise<ScopedAskResult> {
+  const callee = await resolveCoworker(input.callerId, input.target);
+  if (!callee) return { ok: false, error: `找不到名為「${input.target}」的同事或部門。` };
+  const caller = await principalOf(input.callerId);
+
+  // F1: floor the declared scope by the question's content — mislabelling can
+  // only make it STRICTER (deny), never more permissive.
+  const effScope = stricterScope(input.scope, detectMinimumScope(input.question));
+  const purpose = input.purpose?.trim() || `查詢${effScope}相關資訊`;
+  const decision = await pepIntersection(input.callerId, callee.id, effScope, purpose);
+
+  // Denied → record + notify immediately, then refuse (no consent can lift a
+  // scope denial; sensitive/private stay self-only).
+  if (!decision.allowed) {
+    const audit = await recordQueryAudit({
+      callerId: input.callerId, subjectId: callee.id, scope: effScope, purpose,
+      allowed: false, deniedFields: decision.deniedFields,
+    });
+    await notifyQuery({
+      subjectId: callee.id, actorId: input.callerId, actorName: caller?.name ?? "一位同事",
+      scope: effScope, allowed: false, purpose, auditId: audit.id,
+    });
+    return { ok: false, denied: true, error: `權限交集拒絕:${decision.deniedReason}`, scope: effScope, droppedFields: decision.deniedFields };
+  }
+
+  // Allowed but cross-department + HITL on → defer to consent (no ledger yet).
+  const crossDept = !!caller?.departmentId && caller.departmentId !== callee.departmentId;
+  if ((input.allowHitl ?? false) && crossDeptHitlEnabled() && crossDept) {
+    return { ok: false, needsHitl: true, calleeId: callee.id, calleeName: callee.name, scope: effScope, purpose };
+  }
+
+  // Allowed → record + notify, then run the tool-intersection sub-run.
+  const audit = await recordQueryAudit({
+    callerId: input.callerId, subjectId: callee.id, scope: effScope, purpose, allowed: true,
+  });
+  await notifyQuery({
+    subjectId: callee.id, actorId: input.callerId, actorName: caller?.name ?? "一位同事",
+    scope: effScope, allowed: true, purpose, auditId: audit.id,
+  });
+  const r = await askCoworker({ chain: input.chain, target: input.target, question: input.question });
+  if (!r.ok) return { ok: false, error: r.error, scope: effScope };
+  return { ok: true, from: r.from, answer: r.answer, scope: effScope, droppedTools: r.droppedTools };
 }

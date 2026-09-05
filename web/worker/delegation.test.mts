@@ -132,15 +132,21 @@ try {
     delegRows.some((r) => (r.detail as { calleeDept?: string })?.calleeDept === finDept),
   );
 
-  // ---- 5. cross-dept HITL: callee consents, sub-run runs under intersect --
+  // ---- 5. HITL consent: callee approves → executor runs the scoped ask -----
+  // The a2a executor now routes through runScopedAsk (scope-PEP + ledger written
+  // POST-consent), so the parked params carry target + scope, and the caller
+  // must actually pass the scope-PEP: cfo is fin's line manager → project OK.
+  const finName = (await db.select({ name: employees.name }).from(employees).where(eq(employees.id, fin)))[0].name;
   const pending = await createPendingAction(fin, "delegation.ask", {
-    callerId: sales,
-    chain: [sales],
-    question: "幫我查一下工程部薪酬",
+    callerId: cfo,
+    chain: [cfo],
+    target: finName,
+    scope: "project",
+    question: "幫我看 A 專案的進度",
   });
-  check("cross-dept delegation parked for callee consent", !!pending.id);
+  check("delegation parked for callee consent", !!pending.id);
   const approved = await resolvePendingAction(pending.id, fin, "manager", "approve");
-  check("callee approves → sub-run executes under intersection", approved.ok, approved);
+  check("callee approves → scoped sub-run executes (ledger post-consent)", approved.ok, approved);
 
   // ---- 6. permission-graph auditor flags over-privilege ------------------
   const orgToolName = (await db.select({ name: tools.name }).from(tools).where(eq(tools.id, orgTool.id)))[0].name;
