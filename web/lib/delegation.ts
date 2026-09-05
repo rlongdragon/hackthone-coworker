@@ -54,21 +54,58 @@ function likeExact(s: string): string {
   return s.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
 
+// Normalise a model-supplied target: fullwidth punctuation → ASCII, collapse
+// whitespace. Models routinely write "小明（財務）" for a row named "小明 (財務)".
+function normTarget(s: string): string {
+  return s
+    .replace(/（/g, "(").replace(/）/g, ")")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export async function resolveCoworker(
   callerId: string,
   target: string,
 ): Promise<Principal | null> {
-  const q = target.trim();
+  const q = normTarget(target);
   if (!q) return null;
   const exact = likeExact(q);
 
-  // 1. by person name
+  // 1a. by person name — exact (case-insensitive, wildcards escaped)
   const byName = await db
     .select({ id: employees.id })
     .from(employees)
     .where(and(ilike(employees.name, exact), eq(employees.active, true), ne(employees.id, callerId)))
     .limit(1);
   if (byName[0]) return principalOf(byName[0].id);
+
+  // 1b. by person name — CONTAINS (still escaped, so "%" can't wildcard). Lets
+  // "小明" reach "小明 (財務)". Requires ≥2 chars and prefers a prefix match
+  // when several rows contain the fragment; ties broken by name order so the
+  // choice is deterministic, never DB-order-dependent.
+  const containsMatch = async (frag: string): Promise<string | null> => {
+    if (frag.length < 2) return null;
+    const rows = await db
+      .select({ id: employees.id, name: employees.name })
+      .from(employees)
+      .where(and(ilike(employees.name, `%${likeExact(frag)}%`), eq(employees.active, true), ne(employees.id, callerId)))
+      .orderBy(employees.name)
+      .limit(10);
+    if (rows.length === 0) return null;
+    const lower = frag.toLowerCase();
+    return (rows.find((p) => p.name.toLowerCase().startsWith(lower)) ?? rows[0]).id;
+  };
+  const viaContains = await containsMatch(q);
+  if (viaContains) return principalOf(viaContains);
+
+  // 1c. fall back to the LEADING name before any parenthetical — "小明（財務）"
+  // (no space) must still find the row "小明 (財務)" (with a space). The bare
+  // name is the stable part; whatever follows a paren is decoration.
+  const lead = q.split(/[(（]/)[0].trim();
+  if (lead && lead !== q) {
+    const viaLead = await containsMatch(lead);
+    if (viaLead) return principalOf(viaLead);
+  }
 
   // 2. by department name → prefer a manager/admin, else any active member
   const [dept] = await db

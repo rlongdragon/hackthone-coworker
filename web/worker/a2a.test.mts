@@ -5,7 +5,7 @@ import { eq, inArray, or } from "drizzle-orm";
 import { db } from "../db";
 import { auditLog, collabEvents, departments, employees, projectMembers, projects } from "../db/schema";
 import { pepIntersection, recordQueryAudit, listQueriesAboutMe, auditSummary, detectMinimumScope, stricterScope } from "../lib/pep";
-import { runScopedAsk } from "../lib/delegation";
+import { resolveCoworker, runScopedAsk } from "../lib/delegation";
 import { notifyQuery, getMyNotifications, unreadCount, markNotificationRead, markAllRead } from "../lib/notifications";
 import { ingestCollabEvent, extractDecisionsAndTasks } from "../lib/collab-events";
 
@@ -86,6 +86,18 @@ try {
   check("recipient can mark own notification read", await markNotificationRead(someNotif, sub));
   const cleared = await markAllRead(sub);
   check("mark-all-read clears the rest", cleared >= 1 && (await unreadCount(sub)) === 0, cleared);
+
+  // ---- 3a. resolveCoworker: model-style targets must resolve ----------------
+  // Found by the REAL chat E2E: the LLM wrote "小明" / "小明（財務）" (fullwidth)
+  // for a row named "小明 (財務)" and exact-match failed → agent couldn't reach
+  // the coworker at all. Lock in: normalisation + escaped contains-match.
+  const mingLike = await mkEmp("ming (財務)", "employee", eng); // name = qa-ming (財務)-<rand>
+  const byFullwidth = await resolveCoworker(mgr, `qa-ming（財務）-${rand}`);
+  check("fullwidth parens normalise to the exact row", byFullwidth?.id === mingLike, byFullwidth?.name);
+  const byFragment = await resolveCoworker(mgr, `qa-ming`);
+  check("bare name fragment resolves via contains-match", byFragment?.id === mingLike, byFragment?.name);
+  const wild = await resolveCoworker(mgr, "%");
+  check("wildcard-only target does NOT resolve (escaped, <2 chars)", wild === null, wild?.name);
 
   // ---- 3b. F1: content-floor stops scope MISLABELLING ----------------------
   check("detectMinimumScope flags a leave question as sensitive", detectMinimumScope("小明最近為什麼請假") === "sensitive");
