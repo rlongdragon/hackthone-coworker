@@ -1,13 +1,40 @@
 import Link from "next/link";
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray } from "drizzle-orm";
 import { ArrowLeft, Circle, CircleCheckBig, Trash2 } from "lucide-react";
 import { requireEmployee } from "@/lib/authz";
 import { db } from "@/db";
-import { employees, projects, todos } from "@/db/schema";
+import { employees, pendingActions, projects, todos } from "@/db/schema";
 import { toggleTodo } from "@/lib/project-actions";
 import { deleteTodo } from "@/lib/todo-actions";
 import { Badge } from "@/components/ui/badge";
 import { AddTodoForm } from "./add-todo-form";
+import { ConsentList, type ConsentItem } from "./consent-list";
+
+// Cross-dept dispatches parked for THIS employee's decision (requester == me).
+async function pendingConsents(userId: string): Promise<ConsentItem[]> {
+  const rows = await db
+    .select({ id: pendingActions.id, params: pendingActions.params, expiresAt: pendingActions.expiresAt })
+    .from(pendingActions)
+    .where(and(eq(pendingActions.requesterId, userId), eq(pendingActions.action, "dispatch.assign"), eq(pendingActions.status, "pending"), gt(pendingActions.expiresAt, new Date())))
+    .orderBy(desc(pendingActions.createdAt))
+    .limit(20);
+  const params = rows.map((r) => r.params as { title?: string; assignedBy?: string; projectId?: string | null });
+  const byIds = [...new Set(params.map((p) => p.assignedBy).filter(Boolean))] as string[];
+  const projIds = [...new Set(params.map((p) => p.projectId).filter(Boolean))] as string[];
+  const [people, projs] = await Promise.all([
+    byIds.length ? db.select({ id: employees.id, name: employees.name }).from(employees).where(inArray(employees.id, byIds)) : Promise.resolve([]),
+    projIds.length ? db.select({ id: projects.id, name: projects.name }).from(projects).where(inArray(projects.id, projIds)) : Promise.resolve([]),
+  ]);
+  const nameOf = new Map(people.map((p) => [p.id, p.name]));
+  const projOf = new Map(projs.map((p) => [p.id, p.name]));
+  return rows.map((r, i) => ({
+    id: r.id,
+    title: String(params[i].title ?? ""),
+    fromName: nameOf.get(params[i].assignedBy ?? "") ?? "?",
+    projectName: params[i].projectId ? (projOf.get(params[i].projectId) ?? null) : null,
+    expiresAt: r.expiresAt.toISOString(),
+  }));
+}
 
 const TZ_OFFSET_MS = 8 * 3600 * 1000;
 
@@ -37,6 +64,7 @@ export default async function MyTodosPage() {
   const open = rows.filter((t) => !t.done);
   const done = rows.filter((t) => t.done);
   const dayStart = todayStart();
+  const consents = await pendingConsents(user.id);
 
   function Row({ t }: { t: (typeof rows)[number] }) {
     const overdue = !t.done && t.due && t.due < dayStart;
@@ -111,6 +139,7 @@ export default async function MyTodosPage() {
       </div>
 
       <AddTodoForm />
+      <ConsentList items={consents} />
 
       {rows.length === 0 ? (
         <p className="text-muted-foreground mt-8 text-center text-sm">

@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNull } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt } from "drizzle-orm";
 import { db } from "@/db";
 import { telegramGroupMessages, telegramGroups } from "@/db/schema";
 import { extractDecisionsAndTasks, ingestCollabEvent } from "@/lib/collab-events";
@@ -57,11 +57,29 @@ export async function digestGroup(chatId: number, opts?: { hours?: number; actor
     isTainted: true,
   });
   const ext = await extractDecisionsAndTasks(ev.id, content);
+  // Mark ONLY the rows that went into this digest (never the whole window) so
+  // an over-limit backlog is picked up by the next digest instead of lost.
   await db
     .update(telegramGroupMessages)
     .set({ digestedEventId: ev.id })
-    .where(and(eq(telegramGroupMessages.chatId, chatId), isNull(telegramGroupMessages.digestedEventId), gte(telegramGroupMessages.sentAt, since)));
+    .where(inArray(telegramGroupMessages.id, msgs.map((m) => m.id)));
   return { ok: true, eventId: ev.id, messages: msgs.length, decisions: ext.decisions.length, tasks: ext.tasks.length, projectId: g.projectId };
+}
+
+// Privacy controls: /group_context off deletes everything we kept for the
+// group; the daily sweep purges digested rows older than `days`.
+export async function purgeGroupMessages(chatId: number): Promise<number> {
+  const rows = await db.delete(telegramGroupMessages).where(eq(telegramGroupMessages.chatId, chatId)).returning({ id: telegramGroupMessages.id });
+  return rows.length;
+}
+
+export async function purgeDigestedOlderThan(days = 30): Promise<number> {
+  const cutoff = new Date(Date.now() - days * 24 * 3600 * 1000);
+  const rows = await db
+    .delete(telegramGroupMessages)
+    .where(and(lt(telegramGroupMessages.sentAt, cutoff), isNotNull(telegramGroupMessages.digestedEventId)))
+    .returning({ id: telegramGroupMessages.id });
+  return rows.length;
 }
 
 // Daily sweep: every opted-in group with undigested messages.

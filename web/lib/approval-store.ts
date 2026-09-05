@@ -201,9 +201,12 @@ export async function createPendingAction(
   requesterId: string,
   action: string,
   params: Record<string, unknown>,
+  // Chat-confirm actions expire fast (10 min); consent-style ones (a coworker
+  // deciding on a cross-dept dispatch) need days — executors re-validate anyway.
+  opts?: { ttlMs?: number },
 ): Promise<{ id: string; expiresAt: Date }> {
   if (!isKnownAction(action)) throw new Error(`unknown action ${action}`);
-  const expiresAt = new Date(Date.now() + TTL_MS);
+  const expiresAt = new Date(Date.now() + (opts?.ttlMs ?? TTL_MS));
   const [row] = await db
     .insert(pendingActions)
     .values({ requesterId, action, params, expiresAt })
@@ -237,6 +240,14 @@ export async function resolvePendingAction(
   if (!row) return { ok: false, message: "找不到待審核動作(可能已處理過)" };
 
   if (decision === "reject") {
+    // A rejected cross-dept dispatch must not leave the meeting item stuck in
+    // pending_consent — hand it back to the dispatcher as unconfirmed.
+    if (row.action === "dispatch.assign") {
+      const p = row.params as { eventId?: string | null; index?: number };
+      if (p.eventId && Number.isInteger(p.index) && (p.index as number) >= 0) {
+        await markMeetingTask(p.eventId, p.index as number, { status: "unconfirmed", pendingId: undefined, needsConfirm: true });
+      }
+    }
     return { ok: true, message: "已拒絕,未執行任何變更" };
   }
 

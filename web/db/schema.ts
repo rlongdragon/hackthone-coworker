@@ -715,6 +715,7 @@ export const notificationTypeEnum = pgEnum("notification_type", [
   "query_denied",
   "task_assigned",
   "message_mention",
+  "dispatch_consent", // cross-dept dispatch waiting for the assignee's decision
 ]);
 
 // The transparency channel: a subject is told when another agent queried about

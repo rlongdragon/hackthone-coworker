@@ -46,7 +46,7 @@ export async function tightenFindingAction(id: string): Promise<FindingActionSta
   const findingId = asUuid(id);
   if (!findingId) return { ok: false, error: "bad id" };
   try {
-    const r = await actuateFinding(findingId);
+    const r = await actuateFinding(findingId, admin.id);
     if (r.ok) {
       await db.insert(auditLog).values({
         employeeId: admin.id,

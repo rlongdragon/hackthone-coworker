@@ -26,6 +26,12 @@ export function ChannelClient({ projectId, initial, myId }: { projectId: string;
     const since = lastAt.current ?? new Date(0).toISOString();
     const es = new EventSource(`/api/projects/${projectId}/channel/stream?since=${encodeURIComponent(since)}`);
     es.addEventListener("ready", () => setLive(true));
+    // membership revoked while the tab was open → stop, don't auto-reconnect
+    es.addEventListener("gone", () => {
+      setLive(false);
+      es.close();
+      window.location.href = "/projects";
+    });
     es.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data) as { messages?: Msg[] };

@@ -31,13 +31,18 @@ export async function POST(req: Request, ctx: Ctx) {
   if ("err" in gate) return gate.err;
   const [p] = await db.select({ status: projects.status }).from(projects).where(eq(projects.id, gate.projectId)).limit(1);
   if (p?.status !== "active") return new Response("Project archived", { status: 409 });
-  const contentLength = Number(req.headers.get("content-length") ?? 0);
-  if (contentLength > 101 * 1024 * 1024) return new Response("Too large", { status: 413 });
+  // Size gate: require a content-length (chunked bodies would otherwise be
+  // fully buffered by formData()), and re-check the parsed file size after.
+  const MAX_BYTES = 100 * 1024 * 1024;
+  const contentLength = req.headers.get("content-length");
+  if (!contentLength) return new Response("Length required", { status: 411 });
+  if (Number(contentLength) > MAX_BYTES + 1024 * 1024) return new Response("Too large", { status: 413 });
 
   const form = await req.formData().catch(() => null);
   if (!form) return new Response("Bad form", { status: 400 });
   const file = form.get("file");
-  const transcript = String(form.get("transcript") ?? "");
+  const transcript = String(form.get("transcript") ?? "").slice(0, 200_000);
+  if (file instanceof File && file.size > MAX_BYTES) return new Response("Too large", { status: 413 });
   const audio =
     file instanceof File && file.size > 0
       ? { bytes: new Uint8Array(await file.arrayBuffer()), filename: file.name }

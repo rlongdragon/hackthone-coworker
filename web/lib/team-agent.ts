@@ -86,6 +86,13 @@ export async function teamAgentAsk(
     .join("\n\n");
   provenance.push({ type: "member", ref: projectId, label: `成員 ${data.members.length} 人` });
 
+  // Audit the ASK before the model call so a timeout still leaves a record.
+  await db.insert(auditLog).values({
+    employeeId: askerId,
+    action: "team_agent.ask",
+    detail: { projectId, question: question.slice(0, 200), sources: provenance.length },
+  });
+
   const res = await generateText({
     model,
     system:
@@ -94,11 +101,6 @@ export async function teamAgentAsk(
       `<team-data>\n專案說明:${data.project.description ?? "-"}\n成員:${data.members.map((m) => m.name).join("、")}\n看板:\n${boardSummary}\n檔案:${files.map((f) => f.filename).join("、") || "無"}\n\n${meetingText || "(尚無會議記錄)"}\n</team-data>`,
     prompt: `<member-question>\n${question.slice(0, 1000)}\n</member-question>`,
     experimental_telemetry: { isEnabled: true, functionId: "team-agent", metadata: { module: "a2a-ledger", projectId, askerId } },
-  });
-  await db.insert(auditLog).values({
-    employeeId: askerId,
-    action: "team_agent.ask",
-    detail: { projectId, question: question.slice(0, 200), sources: provenance.length },
   });
   return { answer: res.text.slice(0, 4000), provenance };
 }

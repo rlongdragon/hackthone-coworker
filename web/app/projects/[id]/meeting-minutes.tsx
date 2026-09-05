@@ -26,13 +26,15 @@ export type MeetingRecordDto = {
   tasks: MeetingTaskDto[];
   tainted: boolean;
   asr?: { mock?: boolean };
+  truncated?: boolean;
+  analysedChars?: number;
 };
 type Member = { id: string; name: string };
 
 // Pick a default assignee for an extracted task from the model's name hint
 // (untrusted) — only ever a MEMBER of this project, never free text.
 function guessAssignee(hint: string | undefined, members: Member[]): string {
-  if (!hint) return "";
+  if (typeof hint !== "string" || !hint) return ""; // extraction output is untrusted
   const h = hint.trim();
   const m = members.find((x) => x.name.includes(h) || h.includes(x.name.split(/[\s(（]/)[0]));
   return m?.id ?? "";
@@ -126,8 +128,18 @@ export function MeetingMinutes({
       }
       const updated = data.record as MeetingRecordDto;
       setRecords((cur) => cur.map((x) => (x.id === updated.id ? updated : x)));
-      const pend = (data.results as { status: string }[]).filter((x) => x.status === "pending_consent").length;
-      setNotice(pend ? `已指派;其中 ${pend} 項為跨部門,等待對方同意。` : "已建立待辦並通知負責人。");
+      const results = data.results as { status: string; error?: string }[];
+      const assigned = results.filter((x) => x.status === "assigned").length;
+      const pend = results.filter((x) => x.status === "pending_consent").length;
+      const skipped = results.filter((x) => x.status === "skipped");
+      if (!assigned && !pend) {
+        setError(skipped[0]?.error ?? "沒有任何項目被指派(可能已處理或無權指派)。");
+      } else {
+        setNotice(
+          `${assigned ? `已建立 ${assigned} 項待辦並通知負責人` : ""}${assigned && pend ? ";" : ""}${pend ? `${pend} 項跨部門,等待對方同意` : ""}` +
+            (skipped.length ? `;${skipped.length} 項略過(${skipped[0]?.error ?? "已處理"})` : "") + "。",
+        );
+      }
     } finally {
       setConfirming(null);
     }
@@ -185,6 +197,7 @@ export function MeetingMinutes({
                 <Badge variant="outline">{r.source === "audio" ? "音檔 → ASR" : r.source === "telegram" ? "Telegram 群組摘要" : "逐字稿"}</Badge>
                 {r.tainted && <Badge variant="secondary">不可信來源</Badge>}
                 {r.asr?.mock && <Badge variant="destructive">ASR 模型未就緒(示意輸出)</Badge>}
+                {r.truncated && <Badge variant="outline">僅分析前 {r.analysedChars ?? 40000} 字</Badge>}
               </div>
               <details className="mb-2">
                 <summary className="cursor-pointer text-sm">逐字稿({r.transcript.length} 字)</summary>

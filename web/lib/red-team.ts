@@ -248,6 +248,8 @@ async function tmplConfusedDeputy(
 export async function disableOverPrivilegedTools(
   items: { toolId: string; toolName: string }[],
   targetId: string | null,
+  // the admin who triggered the actuation (attribution in the audit trail)
+  actorId: string | null = null,
 ): Promise<string[]> {
   const ids = [...new Set(items.map((i) => i.toolId))];
   if (!ids.length) return [];
@@ -256,7 +258,7 @@ export async function disableOverPrivilegedTools(
     .set({ enabled: false, updatedAt: new Date() })
     .where(inArray(tools.id, ids));
   await db.insert(auditLog).values({
-    employeeId: null,
+    employeeId: actorId,
     action: "redteam.autotighten",
     detail: {
       kind: "tool_disabled",
@@ -551,11 +553,13 @@ export async function autoTightenTool(
   serverId: string,
   toolName: string,
   severity: Severity = "high",
+  // the admin who triggered it (null = automatic sweep)
+  actorId: string | null = null,
 ): Promise<"blocked" | "hitl"> {
   const to = severity === "high" ? "blocked" : "hitl";
   await setToolPolicy(serverId, toolName, to);
   await db.insert(auditLog).values({
-    employeeId: null,
+    employeeId: actorId,
     action: "redteam.autotighten",
     detail: { serverId, toolName, to, severity },
   });
@@ -580,7 +584,7 @@ export type ActuateResult =
 //   over_privilege → every over-granted tool row → enabled=false
 //   memory_timebomb→ quarantine the planted row if it is somehow still live
 // and stamp the finding's actionTaken so the dashboard reflects it.
-export async function actuateFinding(findingId: string): Promise<ActuateResult> {
+export async function actuateFinding(findingId: string, actorId: string | null = null): Promise<ActuateResult> {
   const [row] = await db
     .select()
     .from(attackFindings)
@@ -594,7 +598,7 @@ export async function actuateFinding(findingId: string): Promise<ActuateResult> 
     const drifted = (detail.drifted ?? []) as { serverId?: string; toolName?: string }[];
     for (const d of drifted) {
       if (!d.serverId || !d.toolName) continue;
-      await autoTightenTool(d.serverId, d.toolName, "high");
+      await autoTightenTool(d.serverId, d.toolName, "high", actorId);
       applied.push(d.toolName);
     }
     if (!applied.length) return { ok: false, error: "此發現沒有可封鎖的 MCP 工具" };
@@ -603,7 +607,7 @@ export async function actuateFinding(findingId: string): Promise<ActuateResult> 
     const items = (detail.toolItems ?? []) as { toolId?: string; toolName?: string }[];
     const valid = items.filter((i): i is { toolId: string; toolName: string } => !!i.toolId && !!i.toolName);
     if (!valid.length) return { ok: false, error: "此發現沒有可停用的工具(舊格式紀錄,請再跑一次)" };
-    await disableOverPrivilegedTools(valid, row.targetId);
+    await disableOverPrivilegedTools(valid, row.targetId, actorId);
     applied.push(...valid.map((v) => v.toolName));
     actionTaken = "tool_disabled";
   } else if (row.template === "memory_timebomb") {

@@ -39,7 +39,7 @@ import {
   unlinkTelegram,
   type TgGroup,
 } from "@/lib/telegram-store";
-import { digestAllGroups, digestGroup, saveGroupMessage } from "@/lib/telegram-digest";
+import { digestAllGroups, digestGroup, purgeDigestedOlderThan, purgeGroupMessages, saveGroupMessage } from "@/lib/telegram-digest";
 import { chatFileDiskPath } from "@/lib/chat-file-store";
 import { resolvePendingAction } from "@/lib/approval-store";
 import { listEventsInRange } from "@/lib/event-store";
@@ -492,14 +492,20 @@ bot.command("group_context", async (ctx) => {
   }
   const ok = await setGroupContextOptin(ctx.chat.id, arg === "on");
   groupCache.delete(ctx.chat.id);
-  if (arg === "off") groupCtx.delete(ctx.chat.id);
-  await audit(employee.id, "telegram.group.context", { chatId: ctx.chat.id, on: arg === "on" });
+  let purged = 0;
+  if (arg === "off") {
+    groupCtx.delete(ctx.chat.id);
+    // Opt-out deletes everything we kept for this group (privacy), not just the
+    // in-memory buffer.
+    purged = await purgeGroupMessages(ctx.chat.id).catch(() => 0);
+  }
+  await audit(employee.id, "telegram.group.context", { chatId: ctx.chat.id, on: arg === "on", purged });
   await ctx.reply(
     !ok
       ? "本群尚未授權(先 /authorize)。"
       : arg === "on"
-        ? "已開啟聊天脈絡 📎 本群最近訊息(最多 50 則 / 30 分鐘,只存記憶體)會在我被叫到時提供給 AI。"
-        : "已關閉聊天脈絡,之後的訊息我看過即丟。",
+        ? "已開啟聊天脈絡 📎 本群訊息會在我被叫到時提供給 AI(記憶體最多 50 則 / 30 分鐘),並會保存到資料庫供 /digest 摘要成團隊決議(摘要後 30 天清除;/group_context off 立即全部刪除)。"
+        : `已關閉聊天脈絡,已刪除本群保存的 ${purged} 則訊息;之後的訊息我看過即丟。`,
   );
 });
 
@@ -980,10 +986,14 @@ function startSchedulers() {
     ) {
       lastBriefingDay = day;
       await sendDailyBriefings().catch((e) => console.warn("briefing sweep failed:", e));
-      // Daily group digest for opted-in groups with new messages.
+      // Daily group digest for opted-in groups with new messages, then purge
+      // digested rows older than 30 days (retention).
       await digestAllGroups(24)
         .then((r) => r.length && console.log(`group digest sweep: ${r.length} group(s)`))
         .catch((e) => console.warn("group digest sweep failed:", e));
+      await purgeDigestedOlderThan(30)
+        .then((n) => n && console.log(`group message retention: purged ${n}`))
+        .catch((e) => console.warn("group message purge failed:", e));
     }
   }, 60_000).unref();
   setInterval(() => {

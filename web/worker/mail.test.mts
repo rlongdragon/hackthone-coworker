@@ -43,6 +43,11 @@ try {
   check("unreachable IMAP → connect refused (nothing stored)", !bad.ok && !(await getMailbox(empId)));
   const meta = await connectMailbox(empId, { fromAddress: ME, username: ME, password: "x", imapHost: "169.254.169.254", imapPort: 143, imapSecure: false, smtpHost: GM.host, smtpPort: GM.smtp, smtpSecure: false });
   check("metadata host blocked", !meta.ok);
+  const metaDec = await connectMailbox(empId, { fromAddress: ME, username: ME, password: "x", imapHost: "2852039166", imapPort: 143, imapSecure: false, smtpHost: GM.host, smtpPort: GM.smtp, smtpSecure: false });
+  check("decimal-encoded metadata host blocked (resolved-IP check)", !metaDec.ok);
+  const metaV6 = await connectMailbox(empId, { fromAddress: ME, username: ME, password: "x", imapHost: "[::ffff:169.254.169.254]", imapPort: 143, imapSecure: false, smtpHost: GM.host, smtpPort: GM.smtp, smtpSecure: false });
+  check("IPv6-mapped metadata host blocked", !metaV6.ok);
+  check("connect failure message is generic (no port-scan oracle)", !bad.ok && !/ECONNREFUSED|timeout|handshake/i.test(bad.error), bad);
   const ok = await connectMailbox(empId, { fromAddress: ME, username: ME, password: "secret-pw", imapHost: GM.host, imapPort: GM.imap, imapSecure: false, smtpHost: GM.host, smtpPort: GM.smtp, smtpSecure: false });
   check("connect ok (IMAP login verified)", ok.ok, ok);
   const acct = await getMailbox(empId);

@@ -107,3 +107,6 @@ CREATE TABLE IF NOT EXISTS email_accounts (
   last_sync_at timestamp,
   last_uid integer NOT NULL DEFAULT 0
 );
+
+-- dispatch consent notifications
+ALTER TYPE notification_type ADD VALUE IF NOT EXISTS 'dispatch_consent';

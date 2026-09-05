@@ -1,3 +1,4 @@
+import { lookup } from "node:dns/promises";
 import { and, desc, eq } from "drizzle-orm";
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
@@ -31,20 +32,40 @@ export type MailboxConfig = {
   smtpSecure: boolean;
 };
 
-function isPrivateHost(h: string): boolean {
-  // Block the cloud metadata endpoint; loopback / RFC1918 are ALLOWED on purpose
-  // (self-hosted mail servers live there).
-  const host = h.toLowerCase();
-  return host === "169.254.169.254" || host === "metadata.google.internal" || host.endsWith(".metadata.internal");
+// Block the cloud metadata / link-local range by RESOLVED address (decimal,
+// octal, IPv6-mapped and DNS-aliased encodings all end up as 169.254.x.x or
+// fe80::). Loopback / RFC1918 are ALLOWED on purpose — self-hosted mail servers
+// live there.
+async function isBlockedMailHost(h: string): Promise<boolean> {
+  const host = h.trim().toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
+  if (!host) return true;
+  if (host === "metadata.google.internal" || host.endsWith(".metadata.internal") || host === "metadata") return true;
+  let addrs: { address: string; family: number }[];
+  try {
+    addrs = await lookup(host, { all: true });
+  } catch {
+    return true; // unresolvable → refuse (the IMAP connect would fail anyway)
+  }
+  return addrs.some(({ address }) => {
+    const a = address.toLowerCase();
+    const v4 = a.startsWith("::ffff:") ? a.slice(7) : a;
+    if (/^169\.254\./.test(v4)) return true;
+    if (a.startsWith("fe80:")) return true;
+    return false;
+  });
 }
 
 export async function connectMailbox(employeeId: string, cfg: MailboxConfig): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!/^[^@\s]+@[^@\s]+$/.test(cfg.fromAddress)) return { ok: false, error: "寄件地址格式不對" };
   if (!cfg.imapHost || !cfg.smtpHost) return { ok: false, error: "IMAP / SMTP 主機必填" };
-  if (isPrivateHost(cfg.imapHost) || isPrivateHost(cfg.smtpHost)) return { ok: false, error: "主機不允許" };
+  if (!Number.isInteger(cfg.imapPort) || cfg.imapPort < 1 || cfg.imapPort > 65535) return { ok: false, error: "IMAP 埠不合法" };
+  if (!Number.isInteger(cfg.smtpPort) || cfg.smtpPort < 1 || cfg.smtpPort > 65535) return { ok: false, error: "SMTP 埠不合法" };
+  if ((await isBlockedMailHost(cfg.imapHost)) || (await isBlockedMailHost(cfg.smtpHost))) return { ok: false, error: "主機不允許" };
   if (!cfg.password) return { ok: false, error: "密碼必填" };
 
-  // Prove the credentials work BEFORE storing anything.
+  // Prove the credentials work BEFORE storing anything. The failure reason is
+  // logged server-side but NOT echoed to the caller (a verbose message would
+  // turn this form into an internal port/service scanner).
   const client = new ImapFlow({
     host: cfg.imapHost, port: cfg.imapPort, secure: cfg.imapSecure,
     auth: { user: cfg.username, pass: cfg.password },
@@ -54,7 +75,8 @@ export async function connectMailbox(employeeId: string, cfg: MailboxConfig): Pr
     await client.connect();
     await client.logout();
   } catch (e) {
-    return { ok: false, error: `IMAP 登入失敗:${e instanceof Error ? e.message : String(e)}` };
+    console.warn("mail connect failed:", cfg.imapHost, e instanceof Error ? e.message : e);
+    return { ok: false, error: "IMAP 連線或登入失敗,請檢查主機、埠與帳密" };
   }
 
   // Replace any previous password row, then store the new one encrypted.
@@ -142,7 +164,8 @@ export async function syncInbox(employeeId: string, opts?: { max?: number }): Pr
     await client.logout();
   } catch (e) {
     try { await client.logout(); } catch { /* ignore */ }
-    return { ok: false, error: `收信失敗:${e instanceof Error ? e.message : String(e)}` };
+    console.warn("mail sync failed:", acct.imapHost, e instanceof Error ? e.message : e);
+    return { ok: false, error: "收信失敗,請稍後再試或重新連接信箱" };
   }
   await db.update(emailAccounts).set({ lastUid: maxUid, lastSyncAt: new Date() }).where(eq(emailAccounts.employeeId, employeeId));
   await db.insert(auditLog).values({ employeeId, action: "mail.sync", detail: { fetched } });
@@ -183,6 +206,7 @@ export async function sendMail(employeeId: string, msg: { to: string; subject: s
     await db.insert(auditLog).values({ employeeId, action: "mail.send", detail: { to: msg.to, subject: msg.subject.slice(0, 200), messageId: info.messageId } });
     return { ok: true, messageId: info.messageId };
   } catch (e) {
-    return { ok: false, error: `寄信失敗:${e instanceof Error ? e.message : String(e)}` };
+    console.warn("mail send failed:", acct.smtpHost, e instanceof Error ? e.message : e);
+    return { ok: false, error: "寄信失敗,請檢查 SMTP 設定後再試" };
   }
 }
