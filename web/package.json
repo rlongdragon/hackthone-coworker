@@ -6,7 +6,13 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "worker:telegram": "tsx --dns-result-order=ipv4first --env-file=.env.local worker/telegram.ts"
+    "worker:telegram": "tsx --dns-result-order=ipv4first --env-file=.env.local worker/telegram.ts",
+    "test": "for t in delegation red-team a2a tg-digest mcp mcp-http mcp-repo; do echo \"=== $t ===\"; tsx --env-file=.env.local worker/$t.test.mts || exit 1; done",
+    "test:pep": "tsx --env-file=.env.local worker/a2a.test.mts",
+    "test:a2a": "tsx --env-file=.env.local worker/a2a.test.mts && tsx --env-file=.env.local worker/delegation.test.mts",
+    "test:red-team": "tsx --env-file=.env.local worker/red-team.test.mts",
+    "test:mcp": "tsx --env-file=.env.local worker/mcp.test.mts && tsx --env-file=.env.local worker/mcp-http.test.mts && tsx --env-file=.env.local worker/mcp-repo.test.mts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.52",

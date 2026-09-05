@@ -28,6 +28,7 @@ export async function ingestCollabEvent(input: {
   sourceType: CollabSource;
   sourceId?: string;
   scopeLabel: ScopeLabel;
+  projectId?: string | null;
   createdBy?: string | null;
   content: string;
   isTainted: boolean;
@@ -39,7 +40,9 @@ export async function ingestCollabEvent(input: {
       sourceType: input.sourceType,
       sourceId: input.sourceId ?? null,
       scopeLabel: input.scopeLabel,
+      projectId: input.projectId ?? null,
       createdBy: input.createdBy ?? null,
+      content: input.content,
       contentHash,
       isTainted: input.isTainted,
     })

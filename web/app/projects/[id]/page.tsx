@@ -19,6 +19,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AddMemberForm } from "../projects-client";
 import { ProjectFiles } from "./project-files";
 import { KanbanBoard } from "./kanban-board";
+import { MeetingMinutes } from "./meeting-minutes";
+import { TeamAgent } from "./team-agent";
+import { listMeetingRecords } from "@/lib/meeting-store";
+import { getTeamAgent } from "@/lib/team-agent";
+import { asrConfigured } from "@/lib/asr";
 
 export default async function ProjectPage({
   params,
@@ -32,10 +37,12 @@ export default async function ProjectPage({
   const { project, members, myRole } = data;
   const isOwner = myRole === "owner";
 
-  const [files, myThreads, board] = await Promise.all([
+  const [files, myThreads, board, meetings, teamAgent] = await Promise.all([
     listProjectFiles(project.id),
     listMyProjectThreads(user.id, project.id),
     getBoard(project.id),
+    listMeetingRecords(project.id),
+    getTeamAgent(project.id),
   ]);
 
   return (
@@ -94,6 +101,45 @@ export default async function ProjectPage({
           readOnly={project.status !== "active"}
         />
       </section>
+
+      {/* Meeting records: audio/transcript → team-scoped collab event → decisions +
+          action items (需確認) → confirmed items become dispatched todos */}
+      <section className="mb-6">
+        <MeetingMinutes
+          projectId={project.id}
+          members={members.map((m) => ({ id: m.id, name: m.name }))}
+          canEdit={project.status === "active"}
+          asrEnabled={asrConfigured()}
+          initial={meetings.map((m) => ({
+            id: m.id,
+            createdByName: m.createdByName,
+            createdAt: m.createdAt.toISOString(),
+            source: m.source,
+            transcript: m.transcript,
+            decisions: m.decisions,
+            tasks: m.tasks,
+            tainted: m.tainted,
+            asr: m.asr,
+          }))}
+        />
+      </section>
+
+      {/* The project's own agent identity (scope=team): answers from team-produced
+          data only — board, files, meeting decisions — never a member's private memory */}
+      {teamAgent && (
+        <section className="mb-6">
+          <TeamAgent
+            projectId={project.id}
+            identity={{
+              projectName: teamAgent.projectName,
+              permissions: teamAgent.permissions,
+              memberCount: teamAgent.memberCount,
+              meetingCount: teamAgent.meetingCount,
+              decisionCount: teamAgent.decisionCount,
+            }}
+          />
+        </section>
+      )}
 
       <div className="grid gap-6 md:grid-cols-[1fr_280px]">
         {/* Members */}

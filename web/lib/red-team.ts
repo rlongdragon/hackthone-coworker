@@ -1,6 +1,6 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { attackFindings, auditLog, employees } from "@/db/schema";
+import { attackFindings, auditLog, employees, tools } from "@/db/schema";
 import {
   listVisibleTools,
   pepEnforced,
@@ -13,7 +13,13 @@ import {
   saveMemory,
   searchMemories,
 } from "@/lib/memory-store";
-import { setToolPolicy } from "@/lib/mcp-store";
+import {
+  buildConnectSpec,
+  getServerTools,
+  listVisibleServers,
+  setToolPolicy,
+} from "@/lib/mcp-store";
+import { listMcpTools, openMcp, toolSurfaceHash } from "@/lib/mcp-client";
 
 // ============================================================================
 // Self-red-team (agent-society · Pillar 2)
@@ -74,6 +80,7 @@ export type GraphFinding = {
   employeeId: string;
   employeeName: string;
   role: string;
+  toolId: string;
   toolName: string;
   scope: string;
   reason: string;
@@ -97,6 +104,7 @@ export async function auditPermissionGraph(
           employeeId: p.id,
           employeeName: p.name,
           role: p.role,
+          toolId: t.id,
           toolName: t.name,
           scope: t.scope,
           reason: "非管理員可直接使用 org 範圍的敏感動作(過度授權)",
@@ -233,19 +241,55 @@ async function tmplConfusedDeputy(
   };
 }
 
-// Over-privilege: surface the graph-audit findings for this target.
-async function tmplOverPrivilege(targetId: string): Promise<Finding> {
+// Over-privilege actuator: pull the over-granted org-sensitive action out of the
+// library (enabled=false) so no non-admin can reach it until an admin re-enables
+// it deliberately. INTERNAL — same trust posture as autoTightenTool: only reach
+// this from an admin-gated flow (runRedTeam({actuate}) / tightenFindingAction).
+export async function disableOverPrivilegedTools(
+  items: { toolId: string; toolName: string }[],
+  targetId: string | null,
+): Promise<string[]> {
+  const ids = [...new Set(items.map((i) => i.toolId))];
+  if (!ids.length) return [];
+  await db
+    .update(tools)
+    .set({ enabled: false, updatedAt: new Date() })
+    .where(inArray(tools.id, ids));
+  await db.insert(auditLog).values({
+    employeeId: null,
+    action: "redteam.autotighten",
+    detail: {
+      kind: "tool_disabled",
+      targetId,
+      tools: items.map((i) => ({ id: i.toolId, name: i.toolName })),
+      to: "disabled",
+    },
+  });
+  return ids;
+}
+
+// Over-privilege: surface the graph-audit findings for this target. With
+// `actuate` the blue-team disables the offending tool rows on the spot.
+async function tmplOverPrivilege(targetId: string, actuate: boolean): Promise<Finding> {
   const { findings } = await auditPermissionGraph([targetId]);
   if (findings.length) {
+    const items = findings.map((f) => ({ toolId: f.toolId, toolName: f.toolName }));
+    let actionTaken = "flagged_for_review";
+    if (actuate) {
+      await disableOverPrivilegedTools(items, targetId);
+      actionTaken = "tool_disabled";
+    }
     return {
       template: "over_privilege",
       category: "over_privilege",
       targetId,
       severity: "medium",
       status: "detected",
-      summary: `發現 ${findings.length} 項過度授權(非管理員可直接用 org 敏感動作)。`,
-      detail: { tools: findings.map((f) => f.toolName) },
-      actionTaken: "flagged_for_review",
+      summary: actuate
+        ? `發現 ${findings.length} 項過度授權(非管理員可直接用 org 敏感動作),已停用該工具。`
+        : `發現 ${findings.length} 項過度授權(非管理員可直接用 org 敏感動作)。`,
+      detail: { tools: findings.map((f) => f.toolName), toolItems: items },
+      actionTaken,
       memoryIsolated: false,
     };
   }
@@ -262,12 +306,162 @@ async function tmplOverPrivilege(targetId: string): Promise<Finding> {
   };
 }
 
+// MCP drift (rug-pull): for every ENABLED MCP server this target can draw tools
+// from, reconnect, re-list, and compare each live tool surface to the hash
+// pinned at approval time. A mismatch means the server changed its
+// description/schema after the admin approved it — the classic rug-pull — and
+// the tool is flipped to blocked on the spot. Already-blocked tools are out of
+// the agent's reach, so drift on them is contained (defended, not detected).
+// A server we cannot reach is an `error` (unknown state), never `detected`.
+type DriftHit = { serverId: string; serverName: string; toolName: string; pinned: string; live: string | null; to: string };
+type ServerProbe =
+  | { serverId: string; serverName: string; checked: number; drifted: DriftHit[]; error?: undefined }
+  | { serverId: string; serverName: string; checked: number; drifted: DriftHit[]; error: string };
+
+async function probeServerDrift(server: {
+  id: string;
+  name: string;
+}, spec: Awaited<ReturnType<typeof buildConnectSpec>>): Promise<ServerProbe> {
+  const pinned = (await getServerTools(server.id)).filter(
+    (t) => t.enabled && t.policy !== "blocked",
+  );
+  if (!pinned.length) return { serverId: server.id, serverName: server.name, checked: 0, drifted: [] };
+  let session: Awaited<ReturnType<typeof openMcp>>;
+  try {
+    session = await openMcp(spec);
+  } catch (e) {
+    return {
+      serverId: server.id,
+      serverName: server.name,
+      checked: 0,
+      drifted: [],
+      error: `連線失敗:${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  try {
+    const live = await listMcpTools(session.client);
+    const drifted: DriftHit[] = [];
+    for (const t of pinned) {
+      const def = live.find((d) => d.name === t.name);
+      const liveHash = def ? toolSurfaceHash(def.description, def.inputSchema) : null;
+      if (liveHash === t.descHash) continue;
+      const to = await autoTightenTool(server.id, t.name, "high");
+      drifted.push({ serverId: server.id, serverName: server.name, toolName: t.name, pinned: t.descHash, live: liveHash, to });
+    }
+    return { serverId: server.id, serverName: server.name, checked: pinned.length, drifted };
+  } catch (e) {
+    return {
+      serverId: server.id,
+      serverName: server.name,
+      checked: 0,
+      drifted: [],
+      error: `列舉失敗:${e instanceof Error ? e.message : String(e)}`,
+    };
+  } finally {
+    await session.close();
+  }
+}
+
+// Returns null when the target has no enabled MCP server (nothing to probe).
+// `cache` dedupes the reconnect per server within one red-team run: an org-wide
+// server is probed once, not once per employee.
+async function tmplMcpDrift(
+  targetId: string,
+  cache: Map<string, Promise<ServerProbe>>,
+): Promise<Finding | null> {
+  const servers = (await listVisibleServers(targetId)).filter((s) => s.enabled);
+  if (!servers.length) return null;
+  const probes: ServerProbe[] = [];
+  for (const s of servers) {
+    let p = cache.get(s.id);
+    if (!p) {
+      p = buildConnectSpec(s)
+        .then((spec) => probeServerDrift(s, spec))
+        .catch((e) => ({
+          serverId: s.id,
+          serverName: s.name,
+          checked: 0,
+          drifted: [] as DriftHit[],
+          error: e instanceof Error ? e.message : String(e),
+        }));
+      cache.set(s.id, p);
+    }
+    probes.push(await p);
+  }
+  const drifted = probes.flatMap((p) => p.drifted);
+  const errors = probes.filter((p) => p.error);
+  const checked = probes.reduce((n, p) => n + p.checked, 0);
+  const base = {
+    template: "mcp_drift",
+    category: "rug_pull",
+    targetId,
+    memoryIsolated: false,
+    detail: { servers: probes, drifted, checked },
+  };
+  if (drifted.length) {
+    return {
+      ...base,
+      severity: "high",
+      status: "detected",
+      summary: `${drifted.length} 個 MCP 工具的描述/schema 與核准時的雜湊不符(rug-pull),已封鎖:${drifted
+        .map((d) => `${d.serverName}/${d.toolName}`)
+        .join("、")}。`,
+      actionTaken: "tool_blocked",
+    };
+  }
+  if (errors.length) {
+    return {
+      ...base,
+      severity: "medium",
+      status: "error",
+      summary: `無法連線 ${errors.length} 個 MCP server,無法確認工具表面是否漂移:${errors
+        .map((p) => `${p.serverName}(${p.error})`)
+        .join("、")}。`,
+      actionTaken: "none",
+    };
+  }
+  return {
+    ...base,
+    severity: "low",
+    status: "defended",
+    summary: checked
+      ? `${checked} 個 MCP 工具的即時描述/schema 與核准雜湊一致,未發現漂移。`
+      : "可見的 MCP server 無可用(未封鎖)工具,無需檢查。",
+    actionTaken: "none",
+  };
+}
+
 // ---- orchestrator ----------------------------------------------------------
 
-export async function runRedTeam(opts?: {
+export const RED_TEAM_TEMPLATES = [
+  "memory_timebomb",
+  "confused_deputy",
+  "over_privilege",
+  "mcp_drift",
+] as const;
+export type TemplateName = (typeof RED_TEAM_TEMPLATES)[number];
+const TEMPLATE_CATEGORY: Record<TemplateName, string> = {
+  memory_timebomb: "memory_poison",
+  confused_deputy: "cross_agent",
+  over_privilege: "over_privilege",
+  mcp_drift: "rug_pull",
+};
+function isTemplateName(s: string): s is TemplateName {
+  return (RED_TEAM_TEMPLATES as readonly string[]).includes(s);
+}
+
+export type RunOpts = {
   targetIds?: string[];
   persist?: boolean;
-}): Promise<{
+  // Apply the destructive-ish actuators (disable an over-granted tool row).
+  // Memory quarantine + MCP rug-pull blocking are containment of the attack
+  // the run itself surfaced and always happen. Default false.
+  actuate?: boolean;
+  // Restrict to a subset of templates (per-finding re-run).
+  templates?: TemplateName[];
+};
+
+export async function runRedTeam(opts?: RunOpts): Promise<{
   ran: number;
   detected: number;
   defended: number;
@@ -275,6 +469,8 @@ export async function runRedTeam(opts?: {
   findings: Finding[];
 }> {
   const persist = opts?.persist ?? true;
+  const actuate = opts?.actuate ?? false;
+  const want = new Set<TemplateName>(opts?.templates ?? RED_TEAM_TEMPLATES);
   const people = await db
     .select({ id: employees.id, departmentId: employees.departmentId })
     .from(employees)
@@ -284,14 +480,40 @@ export async function runRedTeam(opts?: {
     : people;
 
   const findings: Finding[] = [];
+  const driftCache = new Map<string, Promise<ServerProbe>>();
+  // A template that throws must not abort the whole pass: record it as an
+  // `error` finding for that target and keep going.
+  const guarded = async (template: TemplateName, targetId: string, fn: () => Promise<Finding | null>) => {
+    try {
+      const f = await fn();
+      if (f) findings.push(f);
+    } catch (e) {
+      findings.push({
+        template,
+        category: TEMPLATE_CATEGORY[template],
+        targetId,
+        severity: "medium",
+        status: "error",
+        summary: `攻擊模板執行出錯:${e instanceof Error ? e.message : String(e)}`,
+        detail: {},
+        actionTaken: "none",
+        memoryIsolated: false,
+      });
+    }
+  };
   for (const t of targets) {
     // peers in a different department make the best confused-deputy probes.
     const peers = people
       .filter((p) => p.id !== t.id && p.departmentId !== t.departmentId)
       .map((p) => p.id);
-    findings.push(await tmplMemoryTimebomb(t.id));
-    findings.push(await tmplConfusedDeputy(t.id, peers.length ? peers : people.filter((p) => p.id !== t.id).map((p) => p.id)));
-    findings.push(await tmplOverPrivilege(t.id));
+    if (want.has("memory_timebomb")) await guarded("memory_timebomb", t.id, () => tmplMemoryTimebomb(t.id));
+    if (want.has("confused_deputy")) {
+      await guarded("confused_deputy", t.id, () =>
+        tmplConfusedDeputy(t.id, peers.length ? peers : people.filter((p) => p.id !== t.id).map((p) => p.id)),
+      );
+    }
+    if (want.has("over_privilege")) await guarded("over_privilege", t.id, () => tmplOverPrivilege(t.id, actuate));
+    if (want.has("mcp_drift")) await guarded("mcp_drift", t.id, () => tmplMcpDrift(t.id, driftCache));
   }
 
   const findingIds: string[] = [];
@@ -302,6 +524,8 @@ export async function runRedTeam(opts?: {
       action: "redteam.run",
       detail: {
         targets: targets.length,
+        templates: [...want],
+        actuate,
         detected: findings.filter((f) => f.status === "detected").length,
         enforced: pepEnforced(),
       },
@@ -343,6 +567,90 @@ export async function runSelfRedTeam(agentId: string) {
   return runRedTeam({ targetIds: [agentId], persist: true });
 }
 
+// ---- per-finding closed loop (dashboard buttons) ----------------------------
+// Both are INTERNAL like autoTightenTool: reach them only via an admin-gated
+// server action (agent-society-actions.ts).
+
+export type ActuateResult =
+  | { ok: true; actionTaken: string; applied: string[] }
+  | { ok: false; error: string };
+
+// Apply the blue-team actuator that matches one recorded finding:
+//   mcp_drift      → every drifted tool → policy blocked
+//   over_privilege → every over-granted tool row → enabled=false
+//   memory_timebomb→ quarantine the planted row if it is somehow still live
+// and stamp the finding's actionTaken so the dashboard reflects it.
+export async function actuateFinding(findingId: string): Promise<ActuateResult> {
+  const [row] = await db
+    .select()
+    .from(attackFindings)
+    .where(eq(attackFindings.id, findingId))
+    .limit(1);
+  if (!row) return { ok: false, error: "finding not found" };
+  const detail = (row.detail ?? {}) as Record<string, unknown>;
+  let actionTaken: string;
+  const applied: string[] = [];
+  if (row.template === "mcp_drift") {
+    const drifted = (detail.drifted ?? []) as { serverId?: string; toolName?: string }[];
+    for (const d of drifted) {
+      if (!d.serverId || !d.toolName) continue;
+      await autoTightenTool(d.serverId, d.toolName, "high");
+      applied.push(d.toolName);
+    }
+    if (!applied.length) return { ok: false, error: "此發現沒有可封鎖的 MCP 工具" };
+    actionTaken = "tool_blocked";
+  } else if (row.template === "over_privilege") {
+    const items = (detail.toolItems ?? []) as { toolId?: string; toolName?: string }[];
+    const valid = items.filter((i): i is { toolId: string; toolName: string } => !!i.toolId && !!i.toolName);
+    if (!valid.length) return { ok: false, error: "此發現沒有可停用的工具(舊格式紀錄,請再跑一次)" };
+    await disableOverPrivilegedTools(valid, row.targetId);
+    applied.push(...valid.map((v) => v.toolName));
+    actionTaken = "tool_disabled";
+  } else if (row.template === "memory_timebomb") {
+    const memoryId = typeof detail.memoryId === "string" ? detail.memoryId : null;
+    if (!memoryId) return { ok: false, error: "此發現沒有可隔離的記憶列" };
+    await quarantineMemory(memoryId);
+    applied.push(memoryId);
+    actionTaken = "memory_quarantined";
+  } else {
+    return { ok: false, error: `模板 ${row.template} 沒有對應的收緊動作` };
+  }
+  await db
+    .update(attackFindings)
+    .set({ actionTaken, memoryIsolated: row.memoryIsolated || actionTaken === "memory_quarantined" })
+    .where(eq(attackFindings.id, findingId));
+  return { ok: true, actionTaken, applied };
+}
+
+export type RerunResult =
+  | { ok: true; findingId: string; status: Status; actionTaken: string; summary: string }
+  | { ok: false; error: string };
+
+// Re-fire ONLY this finding's template at its target and persist the new
+// finding — after a tighten the same probe should now come back `defended`.
+export async function rerunFinding(findingId: string): Promise<RerunResult> {
+  const [row] = await db
+    .select({ template: attackFindings.template, targetId: attackFindings.targetId })
+    .from(attackFindings)
+    .where(eq(attackFindings.id, findingId))
+    .limit(1);
+  if (!row) return { ok: false, error: "finding not found" };
+  if (!row.targetId) return { ok: false, error: "此發現沒有對象,無法重跑" };
+  if (!isTemplateName(row.template)) return { ok: false, error: `未知模板 ${row.template}` };
+  const r = await runRedTeam({
+    targetIds: [row.targetId],
+    persist: true,
+    actuate: false,
+    templates: [row.template],
+  });
+  const f = r.findings[0];
+  const id = r.findingIds[0];
+  if (!f || !id) {
+    return { ok: false, error: "重跑未產生新發現(對象可能已停用,或已無可檢查的 MCP server)" };
+  }
+  return { ok: true, findingId: id, status: f.status, actionTaken: f.actionTaken, summary: f.summary };
+}
+
 // ---- dashboard reads -------------------------------------------------------
 
 export async function listFindings(limit = 100) {
@@ -370,6 +678,11 @@ export type DelegationLog = {
   id: string;
   createdAt: Date;
   detail: {
+    callerId?: string;
+    calleeId?: string;
+    // Every principal in the delegation, origin first, callee last.
+    chain?: string[];
+    depth?: number;
     callerName?: string;
     calleeName?: string;
     crossDept?: boolean;
@@ -419,6 +732,85 @@ export async function delegationScoreboard(): Promise<{
     governedLeakRate: crossScope ? leakedGoverned / crossScope : 0,
     frameworkDefaultLeakRate: crossScope ? 1 : 0,
   };
+}
+
+// Delegation chain for the dashboard: A → B → C with, per hop, how many tools
+// the intersection exposed and how many it dropped. The audit row for a hop
+// only carries ITS OWN exposed/dropped, so earlier hops of a multi-hop row are
+// resolved from the latest prior `delegation.ask` row whose chain is that
+// prefix (the sub-run that produced it). The origin shows its current own
+// visible-tool count (live, not historical — labelled as such in the UI).
+export type ChainHop = {
+  id: string;
+  name: string;
+  exposed: number | null; // tools usable at this hop (origin: own count)
+  dropped: number | null; // tools the intersection removed at this hop
+};
+
+export async function resolveDelegationChains(
+  rows: DelegationLog[],
+): Promise<Record<string, ChainHop[]>> {
+  const chainOf = (r: DelegationLog): string[] => {
+    const c = r.detail?.chain;
+    if (Array.isArray(c) && c.length >= 2) return c;
+    return [r.detail?.callerId, r.detail?.calleeId].filter((x): x is string => !!x);
+  };
+  const ids = new Set<string>();
+  for (const r of rows) for (const id of chainOf(r)) ids.add(id);
+  const names = new Map<string, string>();
+  if (ids.size) {
+    const people = await db
+      .select({ id: employees.id, name: employees.name })
+      .from(employees)
+      .where(inArray(employees.id, [...ids]));
+    for (const p of people) names.set(p.id, p.name);
+  }
+  // prefix → rows (newest first) for the multi-hop lookup
+  const byChain = new Map<string, DelegationLog[]>();
+  for (const r of rows) {
+    const k = JSON.stringify(chainOf(r));
+    const list = byChain.get(k) ?? [];
+    list.push(r);
+    byChain.set(k, list);
+  }
+  for (const list of byChain.values()) list.sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
+  const ownCount = new Map<string, number>();
+  const own = async (id: string) => {
+    let n = ownCount.get(id);
+    if (n === undefined) {
+      n = (await listVisibleTools(id, [])).length;
+      ownCount.set(id, n);
+    }
+    return n;
+  };
+
+  const out: Record<string, ChainHop[]> = {};
+  for (const r of rows) {
+    const chain = chainOf(r);
+    const hops: ChainHop[] = [];
+    for (let i = 0; i < chain.length; i++) {
+      const id = chain[i];
+      const name = names.get(id) ?? (i === chain.length - 1 ? r.detail?.calleeName : i === 0 ? r.detail?.callerName : null) ?? "?";
+      if (i === 0) {
+        hops.push({ id, name, exposed: await own(id), dropped: null });
+        continue;
+      }
+      const src =
+        i === chain.length - 1
+          ? r
+          : (byChain.get(JSON.stringify(chain.slice(0, i + 1))) ?? []).find(
+              (x) => +new Date(x.createdAt) <= +new Date(r.createdAt),
+            );
+      hops.push({
+        id,
+        name,
+        exposed: src ? (src.detail?.exposedTools ?? []).length : null,
+        dropped: src ? (src.detail?.droppedTools ?? []).length : null,
+      });
+    }
+    out[r.id] = hops;
+  }
+  return out;
 }
 
 // Small helper for the dashboard: each active principal's scope grants.

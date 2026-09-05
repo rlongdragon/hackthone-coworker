@@ -194,6 +194,27 @@ export const telegramGroups = pgTable("telegram_groups", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// a2a-ledger P2: group messages persisted ONLY for groups with context_optin
+// (the worker discards everything else on sight). Feeds the periodic / manual
+// `/digest` → collab_events(telegram_group) decision extraction. Tainted by
+// definition (chat is untrusted input).
+export const telegramGroupMessages = pgTable(
+  "telegram_group_messages",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    chatId: bigint("chat_id", { mode: "number" })
+      .notNull()
+      .references(() => telegramGroups.chatId, { onDelete: "cascade" }),
+    senderName: text("sender_name").notNull(),
+    employeeId: uuid("employee_id").references(() => employees.id, { onDelete: "set null" }),
+    text: text("text").notNull(),
+    sentAt: timestamp("sent_at").defaultNow().notNull(),
+    // set once a digest consumed this row
+    digestedEventId: uuid("digested_event_id"),
+  },
+  (t) => [index("tg_group_msgs_chat_time_idx").on(t.chatId, t.sentAt)],
+);
+
 // FR-P-08 交接傳承: package one employee's agent-accumulated context and hand
 // it to a successor, under approval. Copies, never moves — handover_id tags
 // every copied row so a failed run rolls back clean.
@@ -673,14 +694,19 @@ export const collabEvents = pgTable(
     sourceType: collabSourceEnum("source_type").notNull(),
     sourceId: text("source_id"),
     scopeLabel: scopeLabelEnum("scope_label").notNull(),
+    // The project (team) this artefact belongs to — the team agent's context.
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
     createdBy: uuid("created_by").references(() => employees.id, { onDelete: "set null" }),
+    // The raw artefact (meeting transcript, digest text). Untrusted content.
+    content: text("content"),
     contentHash: text("content_hash"), // taint-tracking pin (rug-pull style)
     isTainted: boolean("is_tainted").notNull().default(false),
-    extractedData: jsonb("extracted_data"), // { decisions:[], tasks:[] }
+    extractedData: jsonb("extracted_data"), // { decisions:[], tasks:[], tainted }
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (t) => [
     index("collab_events_source_idx").on(t.sourceType),
     index("collab_events_scope_idx").on(t.scopeLabel),
+    index("collab_events_project_idx").on(t.projectId),
   ],
 );

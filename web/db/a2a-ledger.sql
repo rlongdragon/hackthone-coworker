@@ -51,3 +51,20 @@ ALTER TABLE memories ADD COLUMN IF NOT EXISTS tainted_source_fields jsonb;
 -- manager dispatch (P4-lite)
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS assigned_by uuid REFERENCES employees(id);
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'assigned';
+
+-- meeting records: link collab events to a project + keep the raw artefact
+ALTER TABLE collab_events ADD COLUMN IF NOT EXISTS project_id uuid REFERENCES projects(id) ON DELETE CASCADE;
+ALTER TABLE collab_events ADD COLUMN IF NOT EXISTS content text;
+CREATE INDEX IF NOT EXISTS collab_events_project_idx ON collab_events (project_id);
+
+-- Telegram group digest: persisted messages (opt-in groups only)
+CREATE TABLE IF NOT EXISTS telegram_group_messages (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  chat_id bigint NOT NULL REFERENCES telegram_groups(chat_id) ON DELETE CASCADE,
+  sender_name text NOT NULL,
+  employee_id uuid REFERENCES employees(id) ON DELETE SET NULL,
+  text text NOT NULL,
+  sent_at timestamp NOT NULL DEFAULT now(),
+  digested_event_id uuid
+);
+CREATE INDEX IF NOT EXISTS tg_group_msgs_chat_time_idx ON telegram_group_messages (chat_id, sent_at);

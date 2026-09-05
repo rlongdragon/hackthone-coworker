@@ -9,9 +9,15 @@ import {
   listDelegations,
   listFindings,
   principalGraph,
+  resolveDelegationChains,
 } from "@/lib/red-team";
 import { pepEnforced } from "@/lib/tool-store";
-import { LeakScoreboard, RunRedTeamButton } from "./governance-client";
+import {
+  DelegationChain,
+  FindingActions,
+  LeakScoreboard,
+  RunRedTeamButton,
+} from "./governance-client";
 
 const sevVariant: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
   high: "destructive",
@@ -28,6 +34,7 @@ export default async function GovernancePage() {
     delegationScoreboard(),
     principalGraph(),
   ]);
+  const chains = await resolveDelegationChains(delegations);
 
   return (
     <main className="mx-auto w-full max-w-5xl p-6">
@@ -81,7 +88,7 @@ export default async function GovernancePage() {
               <thead className="bg-muted/50 text-left">
                 <tr>
                   <th className="p-2">時間</th>
-                  <th className="p-2">誰問誰</th>
+                  <th className="p-2">委派鏈(每跳可用工具數,−交集移除)</th>
                   <th className="p-2">跨部門</th>
                   <th className="p-2">有效角色</th>
                   <th className="p-2">可用工具</th>
@@ -102,7 +109,13 @@ export default async function GovernancePage() {
                       {new Date(d.createdAt).toLocaleString("zh-TW")}
                     </td>
                     <td className="p-2">
-                      {d.detail?.callerName ?? "?"} → {d.detail?.calleeName ?? "?"}
+                      {chains[d.id]?.length ? (
+                        <DelegationChain hops={chains[d.id]} />
+                      ) : (
+                        <>
+                          {d.detail?.callerName ?? "?"} → {d.detail?.calleeName ?? "?"}
+                        </>
+                      )}
                     </td>
                     <td className="p-2">{d.detail?.crossDept ? "是" : "—"}</td>
                     <td className="p-2">{d.detail?.effectiveRole ?? "—"}</td>
@@ -135,12 +148,13 @@ export default async function GovernancePage() {
                   <th className="p-2">結果</th>
                   <th className="p-2">處置</th>
                   <th className="p-2">說明</th>
+                  <th className="p-2">操作</th>
                 </tr>
               </thead>
               <tbody>
                 {findings.length === 0 && (
                   <tr>
-                    <td className="text-muted-foreground p-3" colSpan={7}>
+                    <td className="text-muted-foreground p-3" colSpan={8}>
                       尚無紅隊發現 — 按「立即執行紅隊」開跑。
                     </td>
                   </tr>
@@ -165,6 +179,15 @@ export default async function GovernancePage() {
                       {f.memoryIsolated ? " · 已隔離" : ""}
                     </td>
                     <td className="text-muted-foreground p-2">{f.summary}</td>
+                    <td className="p-2">
+                      <FindingActions
+                        id={f.id}
+                        template={f.template}
+                        status={f.status}
+                        actionTaken={f.actionTaken}
+                        hasTarget={!!f.targetId}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>

@@ -39,6 +39,7 @@ import {
   unlinkTelegram,
   type TgGroup,
 } from "@/lib/telegram-store";
+import { digestAllGroups, digestGroup, saveGroupMessage } from "@/lib/telegram-digest";
 import { chatFileDiskPath } from "@/lib/chat-file-store";
 import { resolvePendingAction } from "@/lib/approval-store";
 import { listEventsInRange } from "@/lib/event-store";
@@ -502,6 +503,38 @@ bot.command("group_context", async (ctx) => {
   );
 });
 
+// /digest [hours]: roll the group's recent (opted-in, persisted) messages into
+// a team-scoped collab event with decisions + action items (需確認), bound to
+// the group's project so it appears in that project's 會議記錄 for dispatch.
+bot.command("digest", async (ctx) => {
+  if (!isGroupChat(ctx.chat.type)) {
+    await ctx.reply("此指令要在群組裡使用。");
+    return;
+  }
+  const group = await cachedGroup(ctx.chat.id);
+  if (!group) return; // unauthorized group: stay silent
+  const employee = await getLinkedEmployee(ctx.from!.id);
+  if (!employee) {
+    await ctx.reply("請先私訊我完成帳號綁定(/link),才能在群組使用。");
+    return;
+  }
+  if (!(await isGroupMember(group, employee.id))) {
+    await ctx.reply(`你不在此群綁定的${group.kind === "project" ? "專案" : "部門"}(${group.bindingName})內。`);
+    return;
+  }
+  const hours = Math.min(168, Math.max(1, Number((ctx.match ?? "").trim()) || 24));
+  const r = await digestGroup(ctx.chat.id, { hours, actorId: employee.id });
+  if (!r.ok) {
+    await ctx.reply(r.error);
+    return;
+  }
+  await audit(employee.id, "telegram.group.digest", { chatId: ctx.chat.id, eventId: r.eventId, messages: r.messages, hours });
+  await ctx.reply(
+    `📝 已摘要最近 ${hours} 小時的 ${r.messages} 則訊息:${r.decisions} 項決議、${r.tasks} 項行動項目(需確認)。` +
+      (r.projectId ? `\n到專案頁「會議記錄」確認並指派:${APP_BASE_URL}/projects/${r.projectId}` : "\n(本群綁定部門,摘要已存為團隊事件)"),
+  );
+});
+
 async function handleGroupText(ctx: Ctx): Promise<void> {
   const group = await cachedGroup(ctx.chat!.id);
   if (!group) return; // unauthorized group: stay silent (AUTH-4 style)
@@ -511,6 +544,15 @@ async function handleGroupText(ctx: Ctx): Promise<void> {
     // Non-trigger message: buffer only when the group opted in, else drop.
     if (group.contextOptin) {
       pushGroupCtx(ctx.chat!.id, ctx.from?.first_name ?? "?", ctx.message!.text!);
+      // Opted-in groups also persist for the /digest → collab_events pipeline
+      // (attributed to the linked employee when the sender is linked).
+      const linked = await getLinkedEmployee(ctx.from!.id).catch(() => null);
+      void saveGroupMessage({
+        chatId: ctx.chat!.id,
+        senderName: ctx.from?.first_name ?? "?",
+        employeeId: linked?.id ?? null,
+        text: ctx.message!.text!,
+      }).catch((e) => console.warn("group msg persist failed:", e));
     }
     return;
   }
@@ -534,6 +576,12 @@ async function handleGroupText(ctx: Ctx): Promise<void> {
   // Buffer the trigger itself too (it's part of the visible conversation).
   if (group.contextOptin) {
     pushGroupCtx(ctx.chat!.id, ctx.from?.first_name ?? "?", ctx.message!.text!);
+    void saveGroupMessage({
+      chatId: ctx.chat!.id,
+      senderName: ctx.from?.first_name ?? "?",
+      employeeId: employee.id,
+      text: ctx.message!.text!,
+    }).catch((e) => console.warn("group msg persist failed:", e));
   }
   const contextNote = group.contextOptin ? readGroupCtx(ctx.chat!.id) : "";
   const parts: UIMessage["parts"] = [{ type: "text", text: triggered || "(呼叫)" }];
@@ -932,6 +980,10 @@ function startSchedulers() {
     ) {
       lastBriefingDay = day;
       await sendDailyBriefings().catch((e) => console.warn("briefing sweep failed:", e));
+      // Daily group digest for opted-in groups with new messages.
+      await digestAllGroups(24)
+        .then((r) => r.length && console.log(`group digest sweep: ${r.length} group(s)`))
+        .catch((e) => console.warn("group digest sweep failed:", e));
     }
   }, 60_000).unref();
   setInterval(() => {

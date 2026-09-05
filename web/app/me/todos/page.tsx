@@ -3,7 +3,7 @@ import { asc, desc, eq } from "drizzle-orm";
 import { ArrowLeft, Circle, CircleCheckBig, Trash2 } from "lucide-react";
 import { requireEmployee } from "@/lib/authz";
 import { db } from "@/db";
-import { projects, todos } from "@/db/schema";
+import { employees, projects, todos } from "@/db/schema";
 import { toggleTodo } from "@/lib/project-actions";
 import { deleteTodo } from "@/lib/todo-actions";
 import { Badge } from "@/components/ui/badge";
@@ -26,9 +26,11 @@ export default async function MyTodosPage() {
       done: todos.done,
       projectId: todos.projectId,
       projectName: projects.name,
+      assignedByName: employees.name, // manager dispatch provenance
     })
     .from(todos)
     .leftJoin(projects, eq(todos.projectId, projects.id))
+    .leftJoin(employees, eq(todos.assignedBy, employees.id))
     .where(eq(todos.employeeId, user.id))
     .orderBy(asc(todos.done), asc(todos.due), desc(todos.createdAt));
 
@@ -63,6 +65,11 @@ export default async function MyTodosPage() {
               {t.projectName}
             </Badge>
           </Link>
+        )}
+        {t.assignedByName && (
+          <Badge variant="secondary" className="shrink-0" title="由主管/同事指派">
+            由 {t.assignedByName} 指派
+          </Badge>
         )}
         <span className="ml-auto flex shrink-0 items-center gap-2">
           {t.due && (

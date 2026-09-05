@@ -6,6 +6,7 @@ import { executeAction } from "@/lib/tool-runtime";
 import { resolveAgentTool, runMcpToolGuarded } from "@/lib/mcp-exec";
 import { runScopedAsk } from "@/lib/delegation";
 import type { ScopeLabel } from "@/lib/pep";
+import { assignTodoFromDispatch, markMeetingTask } from "@/lib/meeting-store";
 
 const TTL_MS = 10 * 60 * 1000;
 
@@ -148,6 +149,28 @@ const ACTIONS: Record<string, ActionDef> = {
       void actorId;
       if (!r.ok) return { ok: false, message: "error" in r ? r.error : "委派未成立" };
       return { ok: true, message: `已同意並在交集權限下回覆:${r.answer.slice(0, 500)}` };
+    },
+  },
+  // Cross-department task dispatch: the ASSIGNEE (requester == approver) must
+  // consent before a manager from another department can put a task on their
+  // list. On approval the todo is created as them, with assignedBy provenance.
+  "dispatch.assign": {
+    requiredRole: "employee",
+    execute: async (params, actorId) => {
+      const title = String(params.title ?? "").trim();
+      const assignedBy = String(params.assignedBy ?? "");
+      const projectId = params.projectId ? String(params.projectId) : null;
+      const eventId = params.eventId ? String(params.eventId) : null;
+      const index = Number(params.index ?? -1);
+      if (!title || !assignedBy) return { ok: false, message: "指派內容不完整" };
+      const { todoId } = await assignTodoFromDispatch({ assigneeId: actorId, assignedBy, projectId, title });
+      if (eventId && index >= 0) await markMeetingTask(eventId, index, { todoId, status: "assigned", pendingId: undefined });
+      await db.insert(auditLog).values({
+        employeeId: assignedBy,
+        action: "dispatch.assign",
+        detail: { assigneeId: actorId, projectId, title, todoId, via: "cross-dept-approval" },
+      });
+      return { ok: true, message: `已接受指派:「${title}」已加入你的待辦` };
     },
   },
 };

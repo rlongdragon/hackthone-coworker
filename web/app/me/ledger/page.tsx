@@ -5,6 +5,7 @@ import { requireEmployee } from "@/lib/authz";
 import { db } from "@/db";
 import { employees } from "@/db/schema";
 import { Badge } from "@/components/ui/badge";
+import { buttonVariants } from "@/components/ui/button";
 import { listQueriesAboutMe } from "@/lib/pep";
 import { getMyNotifications, unreadCount } from "@/lib/notifications";
 import { MarkAllReadButton } from "./ledger-client";
@@ -45,7 +46,16 @@ export default async function LedgerPage() {
           <ArrowLeft className="size-4" /> 回聊天
         </Link>
         <h1 className="text-xl font-semibold tracking-tight">關於我的查詢紀錄</h1>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          {/* GDPR-style dump of the subject's OWN ledger (route is session-scoped) */}
+          <a
+            href="/api/me/ledger/export"
+            download
+            data-testid="ledger-export"
+            className={buttonVariants({ size: "sm", variant: "outline" })}
+          >
+            匯出 JSON
+          </a>
           <MarkAllReadButton unread={unread} />
         </div>
       </div>
